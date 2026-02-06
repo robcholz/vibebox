@@ -13,10 +13,15 @@ apt-get install -y --no-install-recommends      \
         libssl-dev                              \
         curl                                    \
         git                                     \
-        ripgrep
+        ripgrep                                 \
+        openssh-server                          \
+        sudo
 
 # Set hostname to "vibe" so it's clear that you're inside the VM.
 hostnamectl set-hostname vibe
+
+# Enable SSH server so instances can use key-based auth.
+systemctl enable ssh
 
 # Set this env var so claude doesn't complain about running as root.'
 echo "export IS_SANDBOX=1" >> .bashrc

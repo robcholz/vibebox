@@ -7,7 +7,7 @@ use std::{
 use color_eyre::Result;
 
 use vibebox::tui::{AppState, VmInfo};
-use vibebox::{tui, vm};
+use vibebox::{instance, tui, vm};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -40,10 +40,8 @@ fn main() -> Result<()> {
         stdout.flush()?;
     }
 
-    vm::run_with_args(args, |output_monitor, vm_output_fd, vm_input_fd| {
-        tui::passthrough_vm_io(app.clone(), output_monitor, vm_output_fd, vm_input_fd)
-    })
-    .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    instance::run_with_ssh(args, app.clone())
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
 
     Ok(())
 }
