@@ -23,6 +23,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use tui_textarea::{Input, Key, TextArea};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const ASCII_BANNER: [&str; 7] = [
     "░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓███████▓▒░░▒▓████████▓▒░",
@@ -57,13 +58,12 @@ pub struct AppState {
     tick: u64,
     spinner: usize,
     terminal_scroll: usize,
+    input_view_width: u16,
 }
 
 impl AppState {
     pub fn new(cwd: PathBuf, vm_info: VmInfo) -> Self {
-        let mut input = TextArea::default();
-        input.set_cursor_style(Style::default().fg(Color::Yellow));
-        input.set_block(Block::default().borders(Borders::ALL).title("Input"));
+        let input = Self::default_input();
 
         Self {
             cwd,
@@ -76,19 +76,90 @@ impl AppState {
             tick: 0,
             spinner: 0,
             terminal_scroll: 0,
+            input_view_width: 0,
         }
     }
 
-    pub fn input_line_count(&self) -> u16 {
-        self.input.lines().len().max(1) as u16
+    fn default_input() -> TextArea<'static> {
+        let mut input = TextArea::default();
+        input.set_cursor_style(Style::default().fg(Color::Yellow));
+        input.set_block(Block::default().borders(Borders::ALL).title("Input"));
+        input
     }
 
-    pub fn input_height(&self) -> u16 {
-        let mut height = self.input_line_count();
+    fn reset_input(&mut self) {
+        self.input = Self::default_input();
+    }
+
+    fn take_input_text(&mut self) -> String {
+        let text = self.input.lines().join("");
+        self.reset_input();
+        text
+    }
+
+    pub fn input_height_for_width(&self, available_width: u16) -> u16 {
+        let inner_width = self.input_inner_width(available_width).max(1) as usize;
+        let mut visual_lines = 0usize;
+        for line in self.input.lines() {
+            let line_width = UnicodeWidthStr::width(line.as_str());
+            let wrapped = if line_width == 0 {
+                1
+            } else {
+                (line_width + inner_width - 1) / inner_width
+            };
+            visual_lines += wrapped;
+        }
+
+        let mut height = (visual_lines.max(1) as u16).max(1);
         if self.input.block().is_some() {
             height = height.saturating_add(2);
         }
         height.max(1)
+    }
+
+    fn input_inner_width(&self, available_width: u16) -> u16 {
+        if self.input.block().is_some() {
+            available_width.saturating_sub(2)
+        } else {
+            available_width
+        }
+    }
+
+    fn insert_char_with_wrap(&mut self, c: char) {
+        let char_width = UnicodeWidthChar::width(c).unwrap_or(0);
+        let width = self.input_view_width.max(1) as usize;
+        let mut should_wrap = false;
+        if char_width > 0 && width > 0 {
+            let (row, col) = self.input.cursor();
+            if let Some(line) = self.input.lines().get(row) {
+                if col == line.chars().count() {
+                    let line_width = UnicodeWidthStr::width(line.as_str());
+                    should_wrap = line_width + char_width > width;
+                }
+            }
+        }
+
+        if should_wrap {
+            if c == ' ' {
+                self.input.insert_char(c);
+                self.input.insert_newline();
+            } else {
+                self.input.insert_newline();
+                self.input.insert_char(c);
+            }
+        } else {
+            self.input.insert_char(c);
+        }
+    }
+
+    fn insert_str_with_wrap(&mut self, text: &str) {
+        for c in text.chars() {
+            match c {
+                '\n' => self.insert_char_with_wrap(' '),
+                '\r' => {}
+                _ => self.insert_char_with_wrap(c),
+            }
+        }
     }
 
     pub fn push_history(&mut self, line: impl Into<String>) {
@@ -281,7 +352,7 @@ fn handle_event(event: CrosstermEvent, app: &mut AppState) {
         CrosstermEvent::Mouse(event) => handle_mouse_event(event, app),
         CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => {}
         CrosstermEvent::Paste(text) => {
-            app.input.insert_str(&text);
+            app.insert_str_with_wrap(&text);
         }
     }
 }
@@ -325,7 +396,21 @@ fn handle_key_event(key: KeyEvent, app: &mut AppState) {
         KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.terminal_scroll = app.terminal_scroll.saturating_sub(1);
         }
+        KeyCode::Enter => {
+            let message = app.take_input_text();
+            if !message.trim().is_empty() {
+                app.push_history(format!("> {}", message));
+                app.terminal_scroll = 0;
+            }
+        }
         KeyCode::Tab => app.toggle_completions(default_completions()),
+        KeyCode::Char(c)
+            if !key
+                .modifiers
+                .contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.insert_char_with_wrap(c);
+        }
         _ => {
             app.input.input(input_from_key_event(key));
         }
@@ -407,9 +492,10 @@ fn default_completions() -> Vec<String> {
 
 fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     let area = frame.area();
+    app.input_view_width = app.input_inner_width(area.width);
     let layout = compute_layout(
         area,
-        app.input_height(),
+        app.input_height_for_width(area.width),
         app.completions.items().len(),
         app.completions.is_active(),
     );
@@ -491,14 +577,14 @@ fn render_terminal(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let scroll_top = max_top.saturating_sub(terminal_scroll);
     let paragraph = Paragraph::new(Text::from_iter(lines))
         .block(block)
-        .wrap(Wrap { trim: false })
+        .wrap(Wrap { trim: true })
         .scroll((scroll_top.min(u16::MAX as usize) as u16, 0));
 
     frame.render_widget(paragraph, area);
 }
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
-    frame.render_widget(app.input.widget(), area);
+    frame.render_widget(&app.input, area);
     if area.height > 0 && area.width > 0 {
         let cursor = app.input.cursor();
         let inner = match app.input.block() {
