@@ -11,28 +11,29 @@ use crossterm::{
         KeyEvent, KeyEventKind, KeyModifiers,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
 use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
+    backend::CrosstermBackend, buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap},
+    Frame,
+    Terminal,
 };
 use tui_textarea::{Input, Key, TextArea};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const ASCII_BANNER: [&str; 7] = [
-    "░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓███████▓▒░░▒▓████████▓▒░",
-    "░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░",
-    " ░▒▓█▓▒▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░",
-    " ░▒▓█▓▒▒▓█▓▒░░▒▓█▓▒░▒▓███████▓▒░░▒▓██████▓▒░",
-    "  ░▒▓█▓▓█▓▒░ ░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░",
-    "  ░▒▓█▓▓█▓▒░ ░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░",
-    "   ░▒▓██▓▒░  ░▒▓█▓▒░▒▓███████▓▒░░▒▓████████▓▒░",
+    "██╗   ██╗██╗██████╗ ███████╗██████╗  ██████╗ ██╗  ██╗",
+    "██║   ██║██║██╔══██╗██╔════╝██╔══██╗██╔═══██╗╚██╗██╔╝",
+    "██║   ██║██║██████╔╝█████╗  ██████╔╝██║   ██║ ╚███╔╝",
+    "╚██╗ ██╔╝██║██╔══██╗██╔══╝  ██╔══██╗██║   ██║ ██╔██╗",
+    " ╚████╔╝ ██║██████╔╝███████╗██████╔╝╚██████╔╝██╔╝ ██╗",
+    "  ╚═══╝  ╚═╝╚═════╝ ╚══════╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝",
+    "",
 ];
 
 const STATUS_BAR_HEIGHT: u16 = 1;
@@ -57,7 +58,7 @@ pub struct AppState {
     key_input_mode: KeyInputMode,
     tick: u64,
     spinner: usize,
-    terminal_scroll: usize,
+    page_scroll: usize,
     input_view_width: u16,
 }
 
@@ -75,7 +76,7 @@ impl AppState {
             key_input_mode: KeyInputMode::Unknown,
             tick: 0,
             spinner: 0,
-            terminal_scroll: 0,
+            page_scroll: 0,
             input_view_width: 0,
         }
     }
@@ -256,6 +257,7 @@ impl CompletionState {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LayoutAreas {
     pub header: Rect,
@@ -265,6 +267,17 @@ pub struct LayoutAreas {
     pub status: Rect,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PageLayout {
+    header: Rect,
+    terminal: Rect,
+    input: Rect,
+    completions: Rect,
+    status: Rect,
+    total_height: u16,
+}
+
+#[allow(dead_code)]
 pub fn compute_layout(
     area: Rect,
     input_height: u16,
@@ -308,6 +321,62 @@ pub fn compute_layout(
         completions: chunks[3],
         status: chunks[4],
     }
+}
+
+fn compute_page_layout(app: &AppState, width: u16) -> PageLayout {
+    let header_height = header_height();
+    let terminal_height = terminal_height(app, width);
+    let input_height = app.input_height_for_width(width);
+    let (completion_height, status_height) = if app.completions.is_active() {
+        let desired = (app.completions.items().len() as u16).min(COMPLETIONS_MAX_HEIGHT);
+        (desired.saturating_add(2), 0)
+    } else {
+        (0, STATUS_BAR_HEIGHT)
+    };
+
+    let total_height = header_height
+        .saturating_add(terminal_height)
+        .saturating_add(input_height)
+        .saturating_add(completion_height)
+        .saturating_add(status_height)
+        .max(1);
+
+    let mut y = 0u16;
+    let header = Rect::new(0, y, width, header_height);
+    y = y.saturating_add(header_height);
+    let terminal = Rect::new(0, y, width, terminal_height);
+    y = y.saturating_add(terminal_height);
+    let input = Rect::new(0, y, width, input_height);
+    y = y.saturating_add(input_height);
+    let completions = Rect::new(0, y, width, completion_height);
+    y = y.saturating_add(completion_height);
+    let status = Rect::new(0, y, width, status_height);
+
+    PageLayout {
+        header,
+        terminal,
+        input,
+        completions,
+        status,
+        total_height,
+    }
+}
+
+fn terminal_height(app: &AppState, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let lines: Vec<Line> = app
+        .history
+        .iter()
+        .map(|line| Line::from(line.as_str()))
+        .collect();
+    let block = Block::default().borders(Borders::ALL).title("Terminal");
+    let paragraph = Paragraph::new(Text::from_iter(lines))
+        .block(block)
+        .wrap(Wrap { trim: true });
+    let count = paragraph.line_count(width).max(1);
+    (count.min(u16::MAX as usize)) as u16
 }
 
 fn header_height() -> u16 {
@@ -384,23 +453,15 @@ fn handle_key_event(key: KeyEvent, app: &mut AppState) {
     }
 
     match key.code {
-        KeyCode::PageUp => {
-            app.terminal_scroll = app.terminal_scroll.saturating_add(10);
-        }
-        KeyCode::PageDown => {
-            app.terminal_scroll = app.terminal_scroll.saturating_sub(10);
-        }
-        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.terminal_scroll = app.terminal_scroll.saturating_add(1);
-        }
-        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.terminal_scroll = app.terminal_scroll.saturating_sub(1);
-        }
+        KeyCode::PageUp => {}
+        KeyCode::PageDown => {}
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {}
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {}
         KeyCode::Enter => {
             let message = app.take_input_text();
             if !message.trim().is_empty() {
                 app.push_history(format!("> {}", message));
-                app.terminal_scroll = 0;
+                app.page_scroll = usize::MAX;
             }
         }
         KeyCode::Tab => app.toggle_completions(default_completions()),
@@ -421,10 +482,10 @@ fn handle_mouse_event(event: crossterm::event::MouseEvent, app: &mut AppState) {
     use crossterm::event::MouseEventKind;
     match event.kind {
         MouseEventKind::ScrollUp => {
-            app.terminal_scroll = app.terminal_scroll.saturating_add(3);
+            app.page_scroll = app.page_scroll.saturating_sub(3);
         }
         MouseEventKind::ScrollDown => {
-            app.terminal_scroll = app.terminal_scroll.saturating_sub(3);
+            app.page_scroll = app.page_scroll.saturating_add(3);
         }
         _ => {}
     }
@@ -491,27 +552,49 @@ fn default_completions() -> Vec<String> {
 }
 
 fn render(frame: &mut Frame<'_>, app: &mut AppState) {
-    let area = frame.area();
-    app.input_view_width = app.input_inner_width(area.width);
-    let layout = compute_layout(
-        area,
-        app.input_height_for_width(area.width),
-        app.completions.items().len(),
-        app.completions.is_active(),
-    );
+    let viewport = frame.area();
+    if viewport.width == 0 || viewport.height == 0 {
+        return;
+    }
 
-    render_header(frame, layout.header, app);
-    render_terminal(frame, layout.terminal, app);
-    render_input(frame, layout.input, app);
+    app.input_view_width = app.input_inner_width(viewport.width);
+    let layout = compute_page_layout(app, viewport.width);
+    let content_height = layout.total_height.max(1);
+
+    let mut buffer = Buffer::empty(Rect::new(0, 0, viewport.width, content_height));
+    render_header(&mut buffer, layout.header, app);
+    render_terminal(&mut buffer, layout.terminal, app);
+    let cursor_pos = render_input(&mut buffer, layout.input, app);
 
     if app.completions.is_active() {
-        render_completions(frame, layout.completions, app);
+        render_completions(&mut buffer, layout.completions, app);
     } else {
-        render_status(frame, layout.status, app);
+        render_status(&mut buffer, layout.status, app);
+    }
+
+    let max_scroll = content_height.saturating_sub(viewport.height);
+    app.page_scroll = app.page_scroll.min(max_scroll as usize);
+    let scroll = app.page_scroll as u16;
+
+    let view = frame.buffer_mut();
+    for y in 0..viewport.height {
+        let src_y = scroll.saturating_add(y);
+        if src_y >= content_height {
+            break;
+        }
+        for x in 0..viewport.width {
+            view[(x, y)] = buffer[(x, src_y)].clone();
+        }
+    }
+
+    if let Some((x, y)) = cursor_pos {
+        if y >= scroll && y < scroll.saturating_add(viewport.height) {
+            frame.set_cursor_position((x, y - scroll));
+        }
     }
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn render_header(buffer: &mut Buffer, area: Rect, app: &AppState) {
     if area.height == 0 {
         return;
     }
@@ -530,13 +613,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         Span::styled(&app.vm_info.version, Style::default().fg(Color::Yellow)),
     ]);
 
-    frame.render_widget(Paragraph::new(welcome), header_chunks[0]);
+    Paragraph::new(welcome).render(header_chunks[0], buffer);
 
     let banner_lines = ASCII_BANNER.iter().map(|line| Line::from(*line));
-    frame.render_widget(
-        Paragraph::new(Text::from_iter(banner_lines)),
-        header_chunks[1],
-    );
+    Paragraph::new(Text::from_iter(banner_lines)).render(header_chunks[1], buffer);
 
     let info_block = Block::default().borders(Borders::ALL).title("Session");
     let info_lines = vec![
@@ -560,46 +640,44 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         ]),
     ];
 
-    frame.render_widget(
-        Paragraph::new(info_lines).block(info_block),
-        header_chunks[2],
-    );
+    Paragraph::new(info_lines)
+        .block(info_block)
+        .render(header_chunks[2], buffer);
 }
 
-fn render_terminal(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn render_terminal(buffer: &mut Buffer, area: Rect, app: &AppState) {
+    if area.height == 0 {
+        return;
+    }
     let lines = app.history.iter().map(|line| Line::from(line.as_str()));
     let block = Block::default().borders(Borders::ALL).title("Terminal");
-    let inner = block.inner(area);
-    let inner_height = inner.height.max(1) as usize;
-    let total_lines = app.history.len();
-    let max_top = total_lines.saturating_sub(inner_height);
-    let terminal_scroll = app.terminal_scroll.min(max_top);
-    let scroll_top = max_top.saturating_sub(terminal_scroll);
     let paragraph = Paragraph::new(Text::from_iter(lines))
         .block(block)
-        .wrap(Wrap { trim: true })
-        .scroll((scroll_top.min(u16::MAX as usize) as u16, 0));
+        .wrap(Wrap { trim: true });
 
-    frame.render_widget(paragraph, area);
+    paragraph.render(area, buffer);
 }
 
-fn render_input(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
-    frame.render_widget(&app.input, area);
-    if area.height > 0 && area.width > 0 {
-        let cursor = app.input.cursor();
-        let inner = match app.input.block() {
-            Some(block) => block.inner(area),
-            None => area,
-        };
-        let x = inner.x.saturating_add(cursor.1 as u16);
-        let y = inner.y.saturating_add(cursor.0 as u16);
-        if x < inner.x.saturating_add(inner.width) && y < inner.y.saturating_add(inner.height) {
-            frame.set_cursor_position((x, y));
-        }
+fn render_input(buffer: &mut Buffer, area: Rect, app: &mut AppState) -> Option<(u16, u16)> {
+    if area.height == 0 || area.width == 0 {
+        return None;
+    }
+    app.input.render(area, buffer);
+    let cursor = app.input.cursor();
+    let inner = match app.input.block() {
+        Some(block) => block.inner(area),
+        None => area,
+    };
+    let x = inner.x.saturating_add(cursor.1 as u16);
+    let y = inner.y.saturating_add(cursor.0 as u16);
+    if x < inner.x.saturating_add(inner.width) && y < inner.y.saturating_add(inner.height) {
+        Some((x, y))
+    } else {
+        None
     }
 }
 
-fn render_completions(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
+fn render_completions(buffer: &mut Buffer, area: Rect, app: &mut AppState) {
     if area.height == 0 {
         return;
     }
@@ -620,10 +698,10 @@ fn render_completions(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         state.select(Some(app.completions.selected()));
     }
 
-    frame.render_stateful_widget(list, area, &mut state);
+    StatefulWidget::render(list, area, buffer, &mut state);
 }
 
-fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn render_status(buffer: &mut Buffer, area: Rect, app: &AppState) {
     if area.height == 0 {
         return;
     }
@@ -638,7 +716,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         ),
     ]));
 
-    frame.render_widget(status, area);
+    status.render(area, buffer);
 }
 
 struct TerminalGuard {
