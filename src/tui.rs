@@ -1,6 +1,8 @@
 use std::{
     io::{self, Write},
+    os::unix::io::OwnedFd,
     path::PathBuf,
+    sync::{Arc, Mutex},
 };
 
 use color_eyre::Result;
@@ -20,6 +22,8 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
 };
+
+use crate::vm;
 
 const ASCII_BANNER: [&str; 7] = [
     "██╗   ██╗██╗██████╗ ███████╗██████╗  ██████╗ ██╗  ██╗",
@@ -168,6 +172,23 @@ pub fn render_commands_component(app: &mut AppState) -> Result<()> {
     write_buffer_with_style(&buffer, &mut stdout)?;
     stdout.flush()?;
     Ok(())
+}
+
+pub fn passthrough_vm_io(
+    app: Arc<Mutex<AppState>>,
+    output_monitor: Arc<vm::OutputMonitor>,
+    vm_output_fd: OwnedFd,
+    vm_input_fd: OwnedFd,
+) -> vm::IoContext {
+    vm::spawn_vm_io_with_line_handler(output_monitor, vm_output_fd, vm_input_fd, move |line| {
+        if line == ":help" {
+            if let Ok(mut locked) = app.lock() {
+                let _ = render_commands_component(&mut locked);
+            }
+            return true;
+        }
+        false
+    })
 }
 
 fn render_static_buffer(app: &mut AppState, width: u16) -> Buffer {

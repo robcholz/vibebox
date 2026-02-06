@@ -89,3 +89,13 @@ They are also stored per project, in `vibebox.toml`
     - mounts: host_path → guest_path, ro/rw
     - network: mode (allowlist/blocklist) and entries
     - storage: paths to vibebox.toml and .vibebox/ (relative from the project_dir)
+
+## Connection
+
+### SSH
+
+- In Project cache, generate and store ssh pair
+- In provisioning, install and enable openssh-server in VM
+- Mount ssh pair to VM when starting up
+- get ipv4 address of VM, store it to project cache
+- and connect to VM via ssh with ip and ssh key

@@ -1,7 +1,3 @@
-mod session_manager;
-
-pub use session_manager::{SessionError, SessionManager, SessionRecord};
-
 use std::{
     env,
     ffi::OsString,
@@ -119,41 +115,26 @@ impl DirectoryShare {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_cli()?;
 
-    if args.version {
-        println!("Vibe");
-        println!("https://github.com/lynaghk/vibe/");
-        println!("Git SHA: {}", env!("GIT_SHA"));
-        std::process::exit(0);
+    if args.version() {
+        print_version();
+        return Ok(());
     }
 
-    if args.help {
-        println!(
-            "Vibe is a quick way to spin up a Linux virtual machine on Mac to sandbox LLM agents.
-
-vibe [OPTIONS] [disk-image.raw]
-
-Options
-
-  --help                                                    Print this help message.
-  --version                                                 Print the version (commit SHA).
-  --no-default-mounts                                       Disable all default mounts.
-  --mount host-path:guest-path[:read-only | :read-write]    Mount `host-path` inside VM at `guest-path`.
-                                                            Defaults to read-write.
-                                                            Errors if host-path does not exist.
-  --cpus <count>                                            Number of virtual CPUs (default {DEFAULT_CPU_COUNT}).
-  --ram <megabytes>                                         RAM size in megabytes (default {DEFAULT_RAM_MB}).
-  --script <path/to/script.sh>                              Run script in VM.
-  --send <some-command>                                     Type `some-command` followed by newline into the VM.
-  --expect <string> [timeout-seconds]                       Wait for `string` to appear in console output before executing next `--script` or `--send`.
-                                                            If `string` does not appear within timeout (default 30 seconds), shutdown VM with error.
-"
-        );
-        std::process::exit(0);
+    if args.help() {
+        print_help();
+        return Ok(());
     }
 
+    run_with_args(args, spawn_vm_io)
+}
+
+pub fn run_with_args<F>(args: CliArgs, io_handler: F) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
+{
     ensure_signed();
 
     let project_root = env::current_dir()?;
@@ -239,6 +220,11 @@ Options
             ),
             DirectoryShare::new(home.join(".codex"), "/root/.codex".into(), false),
             DirectoryShare::new(home.join(".claude"), "/root/.claude".into(), false),
+            DirectoryShare::new(
+                "/Users/zhangjie/Documents/Code/CompletePrograms/vibebox/.ssh".into(),
+                "/root/.ssh".into(),
+                true,
+            ),
         ]
         .into_iter()
         .flatten()
@@ -258,16 +244,47 @@ Options
     // Any user-provided login actions must come after our system ones
     login_actions.extend(args.login_actions);
 
-    run_vm(
+    run_vm_with_io(
         &disk_path,
         &login_actions,
         &directory_shares[..],
         args.cpu_count,
         args.ram_bytes,
+        io_handler,
     )
 }
 
-struct CliArgs {
+pub fn print_help() {
+    println!(
+        "Vibe is a quick way to spin up a Linux virtual machine on Mac to sandbox LLM agents.
+
+vibe [OPTIONS] [disk-image.raw]
+
+Options
+
+  --help                                                    Print this help message.
+  --version                                                 Print the version (commit SHA).
+  --no-default-mounts                                       Disable all default mounts.
+  --mount host-path:guest-path[:read-only | :read-write]    Mount `host-path` inside VM at `guest-path`.
+                                                            Defaults to read-write.
+                                                            Errors if host-path does not exist.
+  --cpus <count>                                            Number of virtual CPUs (default {DEFAULT_CPU_COUNT}).
+  --ram <megabytes>                                         RAM size in megabytes (default {DEFAULT_RAM_MB}).
+  --script <path/to/script.sh>                              Run script in VM.
+  --send <some-command>                                     Type `some-command` followed by newline into the VM.
+  --expect <string> [timeout-seconds]                       Wait for `string` to appear in console output before executing next `--script` or `--send`.
+                                                            If `string` does not appear within timeout (default 30 seconds), shutdown VM with error.
+"
+    );
+}
+
+pub fn print_version() {
+    println!("Vibe");
+    println!("https://github.com/lynaghk/vibe/");
+    println!("Git SHA: {}", env!("GIT_SHA"));
+}
+
+pub struct CliArgs {
     disk: Option<PathBuf>,
     version: bool,
     help: bool,
@@ -278,14 +295,43 @@ struct CliArgs {
     ram_bytes: u64,
 }
 
-fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
+impl CliArgs {
+    pub fn version(&self) -> bool {
+        self.version
+    }
+
+    pub fn help(&self) -> bool {
+        self.help
+    }
+
+    pub fn cpu_count(&self) -> usize {
+        self.cpu_count
+    }
+
+    pub fn ram_bytes(&self) -> u64 {
+        self.ram_bytes
+    }
+
+    pub fn ram_mb(&self) -> u64 {
+        self.ram_bytes / BYTES_PER_MB
+    }
+}
+
+pub fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
+    parse_cli_from(env::args_os())
+}
+
+pub fn parse_cli_from<I>(args: I) -> Result<CliArgs, Box<dyn std::error::Error>>
+where
+    I: IntoIterator<Item = OsString>,
+{
     fn os_to_string(value: OsString, flag: &str) -> Result<String, Box<dyn std::error::Error>> {
         value
             .into_string()
             .map_err(|_| format!("{flag} expects valid UTF-8").into())
     }
 
-    let mut parser = lexopt::Parser::from_env();
+    let mut parser = lexopt::Parser::from_iter(args);
     let mut disk = None;
     let mut version = false;
     let mut help = false;
@@ -621,11 +667,15 @@ pub fn create_pipe() -> (OwnedFd, OwnedFd) {
     (read_stream.into(), write_stream.into())
 }
 
-pub fn spawn_vm_io(
+pub fn spawn_vm_io_with_line_handler<F>(
     output_monitor: Arc<OutputMonitor>,
     vm_output_fd: OwnedFd,
     vm_input_fd: OwnedFd,
-) -> IoContext {
+    mut on_line: F,
+) -> IoContext
+where
+    F: FnMut(&str) -> bool + ::std::marker::Send + 'static,
+{
     let (input_tx, input_rx): (Sender<VmInput>, Receiver<VmInput>) = mpsc::channel();
 
     // raw_guard is set when we've put the user's terminal into raw mode because we've attached stdin/stdout to the VM.
@@ -679,15 +729,41 @@ pub fn spawn_vm_io(
 
         move || {
             let mut buf = [0u8; 1024];
+            let mut pending_command: Vec<u8> = Vec::new();
+            let mut command_mode = false;
             loop {
                 match poll_with_wakeup(libc::STDIN_FILENO, wakeup_read.as_raw_fd(), &mut buf) {
                     PollResult::Shutdown | PollResult::Error => break,
                     PollResult::Spurious => continue,
                     PollResult::Ready(bytes) => {
+                        let mut send_buf: Vec<u8> = Vec::new();
+                        for &b in bytes {
+                            if pending_command.is_empty() && !command_mode && b == b':' {
+                                command_mode = true;
+                            }
+
+                            if command_mode {
+                                pending_command.push(b);
+                            } else {
+                                send_buf.push(b);
+                            }
+
+                            if b == b'\n' && command_mode {
+                                let line = String::from_utf8_lossy(&pending_command);
+                                let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
+                                let consumed = on_line(trimmed);
+                                if !consumed {
+                                    send_buf.extend_from_slice(&pending_command);
+                                }
+                                pending_command.clear();
+                                command_mode = false;
+                            }
+                        }
                         if raw_guard.lock().unwrap().is_none() {
                             continue;
                         }
-                        if input_tx.send(VmInput::Bytes(bytes.to_vec())).is_err() {
+                        if !send_buf.is_empty() && input_tx.send(VmInput::Bytes(send_buf)).is_err()
+                        {
                             break;
                         }
                     }
@@ -751,6 +827,14 @@ pub fn spawn_vm_io(
         mux_thread,
         stdout_thread,
     }
+}
+
+pub fn spawn_vm_io(
+    output_monitor: Arc<OutputMonitor>,
+    vm_output_fd: OwnedFd,
+    vm_input_fd: OwnedFd,
+) -> IoContext {
+    spawn_vm_io_with_line_handler(output_monitor, vm_output_fd, vm_input_fd, |_| false)
 }
 
 impl IoContext {
@@ -954,13 +1038,17 @@ fn spawn_login_actions_thread(
     })
 }
 
-fn run_vm(
+fn run_vm_with_io<F>(
     disk_path: &Path,
     login_actions: &[LoginAction],
     directory_shares: &[DirectoryShare],
     cpu_count: usize,
     ram_bytes: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+    io_handler: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
+{
     let (vm_reads_from, we_write_to) = create_pipe();
     let (we_read_from, vm_writes_to) = create_pipe();
 
@@ -1021,7 +1109,7 @@ fn run_vm(
     println!("VM booting...");
 
     let output_monitor = Arc::new(OutputMonitor::default());
-    let io_ctx = spawn_vm_io(output_monitor.clone(), we_read_from, we_write_to);
+    let io_ctx = io_handler(output_monitor.clone(), we_read_from, we_write_to);
 
     let mut all_login_actions = vec![
         Expect {
@@ -1110,6 +1198,23 @@ fn run_vm(
     io_ctx.shutdown();
 
     exit_result
+}
+
+fn run_vm(
+    disk_path: &Path,
+    login_actions: &[LoginAction],
+    directory_shares: &[DirectoryShare],
+    cpu_count: usize,
+    ram_bytes: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_vm_with_io(
+        disk_path,
+        login_actions,
+        directory_shares,
+        cpu_count,
+        ram_bytes,
+        spawn_vm_io,
+    )
 }
 
 fn nsurl_from_path(path: &Path) -> Result<Retained<NSURL>, Box<dyn std::error::Error>> {

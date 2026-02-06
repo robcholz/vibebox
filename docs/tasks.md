@@ -29,10 +29,13 @@
 
 ## TUI
 
-1. [ ] Fix the terminal component height issue.
-2. [ ] Fix the input field that does not expand its height (currently, it just roll the text horizontally). The
+1. [x] Fix the terminal component height issue.
+2. [x] Fix the input field that does not expand its height (currently, it just roll the text horizontally). The
    inputfield it should not be scrollable.
 
 ## Integration
 
-1. [ ] Integrate VM and SessionManager together.
+1. [x] Wire up the vm and tui.
+2. [ ] Use ssh to connect to vm.
+3. [ ] wire up SessionManager.
+4. [ ] VM should be separated by per-session VM daemon process (only accepts if to shutdown vm and itself).
