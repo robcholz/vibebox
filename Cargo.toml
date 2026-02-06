@@ -27,3 +27,9 @@ thiserror = "2.0.18"
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 toml = "0.9.8"
 uuid = { version = "1", features = ["v7", "serde"] }
+color-eyre = "0.6.3"
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+futures = "0.3.31"
+ratatui = "0.29.0"
+tokio = { version = "1.40.0", features = ["full"] }
+tui-textarea = { version = "0.4", default-features = false, features = ["ratatui"] }
