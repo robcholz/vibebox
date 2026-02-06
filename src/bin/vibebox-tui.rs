@@ -1,4 +1,9 @@
-use std::{env, ffi::OsString, path::PathBuf};
+use std::{
+    env,
+    ffi::OsString,
+    io::{self, Read, Write},
+    path::PathBuf,
+};
 
 use color_eyre::Result;
 use lexopt::prelude::*;
@@ -33,8 +38,7 @@ enum CliError {
     Io(#[from] std::io::Error),
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     color_eyre::install()?;
 
     let command = parse_args(env::args_os())?;
@@ -52,12 +56,40 @@ async fn main() -> Result<()> {
                 cpu_cores: config.cpu_cores,
             };
             let mut app = AppState::new(config.cwd, vm_info);
-            app.push_history("VM output will appear here.");
-            app.push_history("TODO: wire VM IO into the TUI event loop.");
-            tui::run_tui(app).await?;
+            tui::render_tui_once(&mut app)?;
+            {
+                let mut stdout = io::stdout().lock();
+                writeln!(stdout)?;
+                stdout.flush()?;
+            }
+            passthrough_stdio(&mut app)?;
         }
     }
 
+    Ok(())
+}
+
+fn passthrough_stdio(app: &mut AppState) -> io::Result<()> {
+    let mut stdin = io::stdin().lock();
+    let mut buf = [0u8; 8192];
+    let mut line_buf: Vec<u8> = Vec::new();
+    loop {
+        let n = stdin.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            line_buf.push(b);
+            if b == b'\n' {
+                let line = String::from_utf8_lossy(&line_buf);
+                let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
+                if trimmed == ":help" {
+                    let _ = tui::render_commands_component(app);
+                }
+                line_buf.clear();
+            }
+        }
+    }
     Ok(())
 }
 

@@ -1,27 +1,34 @@
 use std::{
-    io::{self, Stdout},
+    io::{self, Stdout, Write},
     path::PathBuf,
-    time::Duration,
 };
 
 use color_eyre::Result;
 use crossterm::{
+    cursor::{MoveTo, Show},
     event::{
         DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, EventStream, KeyCode,
         KeyEvent, KeyEventKind, KeyModifiers,
     },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    execute, queue,
+    style::{
+        Attribute, Color as CrosstermColor, Print, SetAttribute, SetBackgroundColor,
+        SetForegroundColor,
+    },
+    terminal::{
+        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode,
+    },
 };
 use futures::StreamExt;
 use ratatui::{
-    backend::CrosstermBackend, buffer::Buffer,
+    Frame, Terminal,
+    backend::CrosstermBackend,
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap},
-    Frame,
-    Terminal,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget},
 };
 use tui_textarea::{Input, Key, TextArea};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -36,10 +43,6 @@ const ASCII_BANNER: [&str; 7] = [
     "",
 ];
 
-const STATUS_BAR_HEIGHT: u16 = 1;
-const COMPLETIONS_MAX_HEIGHT: u16 = 6;
-const SPINNER_FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
-
 #[derive(Debug, Clone)]
 pub struct VmInfo {
     pub version: String,
@@ -53,11 +56,9 @@ pub struct AppState {
     pub vm_info: VmInfo,
     pub history: Vec<String>,
     pub input: TextArea<'static>,
-    pub completions: CompletionState,
+    pub commands: VibeboxCommands,
     pub should_quit: bool,
     key_input_mode: KeyInputMode,
-    tick: u64,
-    spinner: usize,
     page_scroll: usize,
     input_view_width: u16,
 }
@@ -65,17 +66,18 @@ pub struct AppState {
 impl AppState {
     pub fn new(cwd: PathBuf, vm_info: VmInfo) -> Self {
         let input = Self::default_input();
+        let mut commands = VibeboxCommands::default();
+        commands.add_command(":new", "Create a new session.");
+        commands.add_command(":exit", "Exit Vibebox.");
 
         Self {
             cwd,
             vm_info,
             history: Vec::new(),
             input,
-            completions: CompletionState::default(),
+            commands,
             should_quit: false,
             key_input_mode: KeyInputMode::Unknown,
-            tick: 0,
-            spinner: 0,
             page_scroll: 0,
             input_view_width: 0,
         }
@@ -171,27 +173,26 @@ impl AppState {
         }
     }
 
-    pub fn activate_completions(&mut self, items: Vec<String>) {
-        self.completions.set_items(items);
-        self.completions.activate();
+    pub fn activate_commands(&mut self) {
+        self.commands.activate();
     }
 
-    pub fn deactivate_completions(&mut self) {
-        self.completions.deactivate();
+    pub fn deactivate_commands(&mut self) {
+        self.commands.deactivate();
     }
 
-    pub fn toggle_completions(&mut self, items: Vec<String>) {
-        if self.completions.active {
-            self.deactivate_completions();
+    pub fn toggle_commands(&mut self) {
+        if self.commands.active {
+            self.deactivate_commands();
         } else {
-            self.activate_completions(items);
+            self.activate_commands();
         }
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct CompletionState {
-    items: Vec<String>,
+#[derive(Debug, Clone)]
+pub struct VibeboxCommands {
+    items: Vec<VibeboxCommand>,
     selected: usize,
     active: bool,
 }
@@ -203,10 +204,17 @@ enum KeyInputMode {
     Release,
 }
 
-impl CompletionState {
+impl VibeboxCommands {
     pub fn set_items(&mut self, items: Vec<String>) {
-        self.items = items;
+        self.items = items.into_iter().map(VibeboxCommand::new).collect();
         self.selected = 0;
+    }
+
+    pub fn add_command(&mut self, name: impl Into<String>, description: impl Into<String>) {
+        self.items.push(VibeboxCommand {
+            name: name.into(),
+            description: description.into(),
+        });
     }
 
     pub fn activate(&mut self) {
@@ -238,13 +246,13 @@ impl CompletionState {
 
     pub fn current(&self) -> Option<&str> {
         if self.active {
-            self.items.get(self.selected).map(|s| s.as_str())
+            self.items.get(self.selected).map(|cmd| cmd.name.as_str())
         } else {
             None
         }
     }
 
-    pub fn items(&self) -> &[String] {
+    pub fn items(&self) -> &[VibeboxCommand] {
         &self.items
     }
 
@@ -254,6 +262,32 @@ impl CompletionState {
 
     pub fn selected(&self) -> usize {
         self.selected
+    }
+}
+
+impl Default for VibeboxCommands {
+    fn default() -> Self {
+        Self {
+            items: vec![VibeboxCommand {
+                name: ":help".to_string(),
+                description: "Show Vibebox commands.".to_string(),
+            }],
+            selected: 0,
+            active: false,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct VibeboxCommand {
+    pub name: String,
+    pub description: String,
+}
+
+impl VibeboxCommand {
+    pub fn new(name: String) -> Self {
+        let description = command_description(&name).to_string();
+        Self { name, description }
     }
 }
 
@@ -278,79 +312,63 @@ struct PageLayout {
 }
 
 #[allow(dead_code)]
-pub fn compute_layout(
-    area: Rect,
-    input_height: u16,
-    completion_items: usize,
-    completion_active: bool,
-) -> LayoutAreas {
+pub fn compute_layout(area: Rect, input_height: u16, completion_items: usize) -> LayoutAreas {
     let header_height = header_height().min(area.height);
     let mut remaining = area.height.saturating_sub(header_height);
 
     let input_height = input_height.max(1).min(remaining);
     remaining = remaining.saturating_sub(input_height);
 
-    let (completion_height, status_height) = if completion_active {
-        let desired = (completion_items as u16).min(COMPLETIONS_MAX_HEIGHT);
-        let height = desired.min(remaining);
-        (height, 0)
+    let completion_height = if completion_items == 0 {
+        0
     } else {
-        let height = STATUS_BAR_HEIGHT.min(remaining);
-        (0, height)
+        let desired = (completion_items as u16).saturating_add(2);
+        desired
     };
+    let completion_height = completion_height.min(remaining);
 
-    remaining = remaining.saturating_sub(completion_height + status_height);
+    let terminal_height = 0;
 
-    let terminal_height = remaining;
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(header_height),
-            Constraint::Length(terminal_height),
-            Constraint::Length(input_height),
-            Constraint::Length(completion_height),
-            Constraint::Length(status_height),
-        ])
-        .split(area);
+    let mut y = 0u16;
+    let header = Rect::new(area.x, area.y + y, area.width, header_height);
+    y = y.saturating_add(header_height);
+    let terminal = Rect::new(area.x, area.y + y, area.width, terminal_height);
+    let input = Rect::new(area.x, area.y + y, area.width, input_height);
+    y = y.saturating_add(input_height);
+    let completions = Rect::new(area.x, area.y + y, area.width, completion_height);
+    let status = Rect::new(area.x, area.y + y, area.width, 0);
 
     LayoutAreas {
-        header: chunks[0],
-        terminal: chunks[1],
-        input: chunks[2],
-        completions: chunks[3],
-        status: chunks[4],
+        header,
+        terminal,
+        input,
+        completions,
+        status,
     }
 }
 
 fn compute_page_layout(app: &AppState, width: u16) -> PageLayout {
     let header_height = header_height();
-    let terminal_height = terminal_height(app, width);
-    let input_height = app.input_height_for_width(width);
-    let (completion_height, status_height) = if app.completions.is_active() {
-        let desired = (app.completions.items().len() as u16).min(COMPLETIONS_MAX_HEIGHT);
-        (desired.saturating_add(2), 0)
+    let input_height = 0;
+    let completion_items = app.commands.items().len();
+    let completion_height = if completion_items == 0 {
+        0
     } else {
-        (0, STATUS_BAR_HEIGHT)
+        (completion_items as u16).saturating_add(2)
     };
-
     let total_height = header_height
-        .saturating_add(terminal_height)
         .saturating_add(input_height)
         .saturating_add(completion_height)
-        .saturating_add(status_height)
         .max(1);
 
     let mut y = 0u16;
     let header = Rect::new(0, y, width, header_height);
     y = y.saturating_add(header_height);
-    let terminal = Rect::new(0, y, width, terminal_height);
-    y = y.saturating_add(terminal_height);
+    let terminal = Rect::new(0, y, width, 0);
     let input = Rect::new(0, y, width, input_height);
     y = y.saturating_add(input_height);
     let completions = Rect::new(0, y, width, completion_height);
-    y = y.saturating_add(completion_height);
-    let status = Rect::new(0, y, width, status_height);
+    let status = Rect::new(0, y, width, 0);
 
     PageLayout {
         header,
@@ -360,23 +378,6 @@ fn compute_page_layout(app: &AppState, width: u16) -> PageLayout {
         status,
         total_height,
     }
-}
-
-fn terminal_height(app: &AppState, width: u16) -> u16 {
-    if width == 0 {
-        return 0;
-    }
-    let lines: Vec<Line> = app
-        .history
-        .iter()
-        .map(|line| Line::from(line.as_str()))
-        .collect();
-    let block = Block::default().borders(Borders::ALL).title("Terminal");
-    let paragraph = Paragraph::new(Text::from_iter(lines))
-        .block(block)
-        .wrap(Wrap { trim: true });
-    let count = paragraph.line_count(width).max(1);
-    (count.min(u16::MAX as usize)) as u16
 }
 
 fn header_height() -> u16 {
@@ -389,21 +390,12 @@ fn header_height() -> u16 {
 pub async fn run_tui(mut app: AppState) -> Result<()> {
     let mut terminal = TerminalGuard::init()?;
     let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
 
     loop {
         terminal.draw(|frame| render(frame, &mut app))?;
 
-        tokio::select! {
-            _ = tick.tick() => {
-                app.tick = app.tick.wrapping_add(1);
-                app.spinner = (app.spinner + 1) % SPINNER_FRAMES.len();
-            },
-            event = events.next() => {
-                if let Some(event) = event {
-                    handle_event(event?, &mut app);
-                }
-            }
+        if let Some(event) = events.next().await {
+            handle_event(event?, &mut app);
         }
 
         if app.should_quit {
@@ -411,6 +403,161 @@ pub async fn run_tui(mut app: AppState) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+pub fn render_tui_once(app: &mut AppState) -> Result<()> {
+    let (width, _) = crossterm::terminal::size()?;
+    if width == 0 {
+        return Ok(());
+    }
+
+    let buffer = render_static_buffer(app, width);
+    let mut stdout = io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Show)?;
+    write_buffer_with_style(&buffer, &mut stdout)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+pub fn render_commands_component(app: &mut AppState) -> Result<()> {
+    let (width, _) = crossterm::terminal::size()?;
+    if width == 0 {
+        return Ok(());
+    }
+
+    let command_count = app.commands.items().len() as u16;
+    let height = if command_count == 0 {
+        0
+    } else {
+        command_count.saturating_add(2)
+    };
+    if height == 0 {
+        return Ok(());
+    }
+
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
+    let area = Rect::new(0, 0, width, height);
+    render_completions(&mut buffer, area, app);
+
+    let mut stdout = io::stdout();
+    write_buffer_with_style(&buffer, &mut stdout)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn render_static_buffer(app: &mut AppState, width: u16) -> Buffer {
+    let layout = compute_page_layout(app, width);
+    let content_height = layout.total_height.max(1);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width, content_height));
+    render_header(&mut buffer, layout.header, app);
+    render_completions(&mut buffer, layout.completions, app);
+    buffer
+}
+
+fn write_buffer_with_style(buffer: &Buffer, out: &mut impl Write) -> io::Result<()> {
+    let area = buffer.area;
+    let mut current_fg: Option<CrosstermColor> = None;
+    let mut current_bg: Option<CrosstermColor> = None;
+    let mut current_modifier: Option<ratatui::style::Modifier> = None;
+
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let cell = &buffer[(x, y)];
+            if cell.skip {
+                continue;
+            }
+
+            let fg = map_color(cell.fg);
+            let bg = map_color(cell.bg);
+            let modifier = cell.modifier;
+            if current_fg != Some(fg)
+                || current_bg != Some(bg)
+                || current_modifier != Some(modifier)
+            {
+                queue!(out, SetAttribute(Attribute::Reset))?;
+                queue!(out, SetForegroundColor(fg), SetBackgroundColor(bg))?;
+                queue_modifier(out, modifier)?;
+                current_fg = Some(fg);
+                current_bg = Some(bg);
+                current_modifier = Some(modifier);
+            }
+
+            let symbol = cell.symbol();
+            if symbol.is_empty() {
+                queue!(out, Print(" "))?;
+            } else {
+                queue!(out, Print(symbol))?;
+            }
+        }
+        queue!(
+            out,
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(CrosstermColor::Reset),
+            SetBackgroundColor(CrosstermColor::Reset),
+            Print("\n")
+        )?;
+        current_fg = None;
+        current_bg = None;
+        current_modifier = None;
+    }
+
+    Ok(())
+}
+
+fn map_color(color: ratatui::style::Color) -> CrosstermColor {
+    match color {
+        ratatui::style::Color::Reset => CrosstermColor::Reset,
+        ratatui::style::Color::Black => CrosstermColor::Black,
+        ratatui::style::Color::Red => CrosstermColor::DarkRed,
+        ratatui::style::Color::Green => CrosstermColor::DarkGreen,
+        ratatui::style::Color::Yellow => CrosstermColor::DarkYellow,
+        ratatui::style::Color::Blue => CrosstermColor::DarkBlue,
+        ratatui::style::Color::Magenta => CrosstermColor::DarkMagenta,
+        ratatui::style::Color::Cyan => CrosstermColor::DarkCyan,
+        ratatui::style::Color::Gray => CrosstermColor::Grey,
+        ratatui::style::Color::DarkGray => CrosstermColor::DarkGrey,
+        ratatui::style::Color::LightRed => CrosstermColor::Red,
+        ratatui::style::Color::LightGreen => CrosstermColor::Green,
+        ratatui::style::Color::LightYellow => CrosstermColor::Yellow,
+        ratatui::style::Color::LightBlue => CrosstermColor::Blue,
+        ratatui::style::Color::LightMagenta => CrosstermColor::Magenta,
+        ratatui::style::Color::LightCyan => CrosstermColor::Cyan,
+        ratatui::style::Color::White => CrosstermColor::White,
+        ratatui::style::Color::Rgb(r, g, b) => CrosstermColor::Rgb { r, g, b },
+        ratatui::style::Color::Indexed(i) => CrosstermColor::AnsiValue(i),
+    }
+}
+
+fn queue_modifier(out: &mut impl Write, modifier: ratatui::style::Modifier) -> io::Result<()> {
+    use ratatui::style::Modifier;
+    if modifier.contains(Modifier::BOLD) {
+        queue!(out, SetAttribute(Attribute::Bold))?;
+    }
+    if modifier.contains(Modifier::DIM) {
+        queue!(out, SetAttribute(Attribute::Dim))?;
+    }
+    if modifier.contains(Modifier::ITALIC) {
+        queue!(out, SetAttribute(Attribute::Italic))?;
+    }
+    if modifier.contains(Modifier::UNDERLINED) {
+        queue!(out, SetAttribute(Attribute::Underlined))?;
+    }
+    if modifier.contains(Modifier::SLOW_BLINK) {
+        queue!(out, SetAttribute(Attribute::SlowBlink))?;
+    }
+    if modifier.contains(Modifier::RAPID_BLINK) {
+        queue!(out, SetAttribute(Attribute::RapidBlink))?;
+    }
+    if modifier.contains(Modifier::REVERSED) {
+        queue!(out, SetAttribute(Attribute::Reverse))?;
+    }
+    if modifier.contains(Modifier::HIDDEN) {
+        queue!(out, SetAttribute(Attribute::Hidden))?;
+    }
+    if modifier.contains(Modifier::CROSSED_OUT) {
+        queue!(out, SetAttribute(Attribute::CrossedOut))?;
+    }
     Ok(())
 }
 
@@ -432,16 +579,16 @@ fn handle_key_event(key: KeyEvent, app: &mut AppState) {
         return;
     }
 
-    if app.completions.is_active() {
+    if app.commands.is_active() {
         match key.code {
-            KeyCode::Esc => app.deactivate_completions(),
-            KeyCode::Up => app.completions.previous(),
-            KeyCode::Down => app.completions.next(),
+            KeyCode::Esc => app.deactivate_commands(),
+            KeyCode::Up => app.commands.previous(),
+            KeyCode::Down => app.commands.next(),
             KeyCode::Enter => {
-                if let Some(selection) = app.completions.current() {
+                if let Some(selection) = app.commands.current() {
                     app.input.insert_str(selection);
                 }
-                app.deactivate_completions();
+                app.deactivate_commands();
             }
             _ => {}
         }
@@ -464,7 +611,7 @@ fn handle_key_event(key: KeyEvent, app: &mut AppState) {
                 app.page_scroll = usize::MAX;
             }
         }
-        KeyCode::Tab => app.toggle_completions(default_completions()),
+        KeyCode::Tab => app.toggle_commands(),
         KeyCode::Char(c)
             if !key
                 .modifiers
@@ -547,8 +694,13 @@ fn input_from_key_event(key: KeyEvent) -> Input {
     }
 }
 
-fn default_completions() -> Vec<String> {
-    vec![":help".to_string(), ":new".to_string(), ":exit".to_string()]
+fn command_description(command: &str) -> &'static str {
+    match command {
+        ":help" => "Show Vibebox commands.",
+        ":new" => "Create a new session.",
+        ":exit" => "Exit Vibebox.",
+        _ => "",
+    }
 }
 
 fn render(frame: &mut Frame<'_>, app: &mut AppState) {
@@ -563,14 +715,7 @@ fn render(frame: &mut Frame<'_>, app: &mut AppState) {
 
     let mut buffer = Buffer::empty(Rect::new(0, 0, viewport.width, content_height));
     render_header(&mut buffer, layout.header, app);
-    render_terminal(&mut buffer, layout.terminal, app);
-    let cursor_pos = render_input(&mut buffer, layout.input, app);
-
-    if app.completions.is_active() {
-        render_completions(&mut buffer, layout.completions, app);
-    } else {
-        render_status(&mut buffer, layout.status, app);
-    }
+    render_completions(&mut buffer, layout.completions, app);
 
     let max_scroll = content_height.saturating_sub(viewport.height);
     app.page_scroll = app.page_scroll.min(max_scroll as usize);
@@ -584,12 +729,6 @@ fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         }
         for x in 0..viewport.width {
             view[(x, y)] = buffer[(x, src_y)].clone();
-        }
-    }
-
-    if let Some((x, y)) = cursor_pos {
-        if y >= scroll && y < scroll.saturating_add(viewport.height) {
-            frame.set_cursor_position((x, y - scroll));
         }
     }
 }
@@ -645,78 +784,32 @@ fn render_header(buffer: &mut Buffer, area: Rect, app: &AppState) {
         .render(header_chunks[2], buffer);
 }
 
-fn render_terminal(buffer: &mut Buffer, area: Rect, app: &AppState) {
-    if area.height == 0 {
-        return;
-    }
-    let lines = app.history.iter().map(|line| Line::from(line.as_str()));
-    let block = Block::default().borders(Borders::ALL).title("Terminal");
-    let paragraph = Paragraph::new(Text::from_iter(lines))
-        .block(block)
-        .wrap(Wrap { trim: true });
-
-    paragraph.render(area, buffer);
-}
-
-fn render_input(buffer: &mut Buffer, area: Rect, app: &mut AppState) -> Option<(u16, u16)> {
-    if area.height == 0 || area.width == 0 {
-        return None;
-    }
-    app.input.render(area, buffer);
-    let cursor = app.input.cursor();
-    let inner = match app.input.block() {
-        Some(block) => block.inner(area),
-        None => area,
-    };
-    let x = inner.x.saturating_add(cursor.1 as u16);
-    let y = inner.y.saturating_add(cursor.0 as u16);
-    if x < inner.x.saturating_add(inner.width) && y < inner.y.saturating_add(inner.height) {
-        Some((x, y))
-    } else {
-        None
-    }
-}
-
 fn render_completions(buffer: &mut Buffer, area: Rect, app: &mut AppState) {
     if area.height == 0 {
         return;
     }
 
     let items: Vec<ListItem<'_>> = app
-        .completions
+        .commands
         .items()
         .iter()
-        .map(|item| ListItem::new(Line::from(item.as_str())))
+        .map(|cmd| ListItem::new(Line::from(format!("{}  {}", cmd.name, cmd.description))))
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Completions"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Vibebox Commands"),
+        )
         .highlight_style(Style::default().fg(Color::Yellow));
 
     let mut state = ListState::default();
-    if app.completions.is_active() && !app.completions.items().is_empty() {
-        state.select(Some(app.completions.selected()));
+    if app.commands.is_active() && !app.commands.items().is_empty() {
+        state.select(Some(app.commands.selected()));
     }
 
     StatefulWidget::render(list, area, buffer, &mut state);
-}
-
-fn render_status(buffer: &mut Buffer, area: Rect, app: &AppState) {
-    if area.height == 0 {
-        return;
-    }
-
-    let spinner = SPINNER_FRAMES[app.spinner % SPINNER_FRAMES.len()];
-    let status = Paragraph::new(Line::from(vec![
-        Span::styled(":help", Style::default().fg(Color::DarkGray)),
-        Span::raw("  "),
-        Span::styled(
-            format!("tick {} {}", app.tick, spinner),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
-
-    status.render(area, buffer);
 }
 
 struct TerminalGuard {
@@ -755,29 +848,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_without_completions_reserves_status_bar() {
+    fn layout_without_completions_hides_status_bar() {
         let area = Rect::new(0, 0, 80, 30);
-        let layout = compute_layout(area, 3, 0, false);
+        let layout = compute_layout(area, 3, 0);
 
         assert_eq!(layout.header.height, header_height());
-        assert_eq!(layout.status.height, STATUS_BAR_HEIGHT);
+        assert_eq!(layout.status.height, 0);
         assert_eq!(layout.completions.height, 0);
-        assert!(layout.terminal.height > 0);
+        assert_eq!(layout.terminal.height, 0);
     }
 
     #[test]
     fn layout_with_completions_hides_status_bar() {
         let area = Rect::new(0, 0, 80, 30);
-        let layout = compute_layout(area, 4, 3, true);
+        let layout = compute_layout(area, 4, 3);
 
         assert_eq!(layout.status.height, 0);
-        assert_eq!(layout.completions.height, 3);
+        assert_eq!(layout.completions.height, 5);
     }
 
     #[test]
     fn layout_clamps_when_space_is_tight() {
         let area = Rect::new(0, 0, 80, header_height() + 1);
-        let layout = compute_layout(area, 3, 10, true);
+        let layout = compute_layout(area, 3, 10);
 
         assert_eq!(layout.header.height, header_height());
         assert_eq!(layout.input.height, 1);
@@ -785,31 +878,31 @@ mod tests {
     }
 
     #[test]
-    fn completion_state_wraps_navigation() {
-        let mut completions = CompletionState::default();
-        completions.set_items(vec!["a".into(), "b".into(), "c".into()]);
-        completions.activate();
+    fn commands_wrap_navigation() {
+        let mut commands = VibeboxCommands::default();
+        commands.set_items(vec![":new".into(), ":exit".into(), ":help".into()]);
+        commands.activate();
 
-        assert_eq!(completions.current(), Some("a"));
+        assert_eq!(commands.current(), Some(":new"));
 
-        completions.next();
-        assert_eq!(completions.current(), Some("b"));
+        commands.next();
+        assert_eq!(commands.current(), Some(":exit"));
 
-        completions.next();
-        completions.next();
-        assert_eq!(completions.current(), Some("a"));
+        commands.next();
+        commands.next();
+        assert_eq!(commands.current(), Some(":new"));
 
-        completions.previous();
-        assert_eq!(completions.current(), Some("c"));
+        commands.previous();
+        assert_eq!(commands.current(), Some(":help"));
     }
 
     #[test]
-    fn completion_state_is_inactive_when_empty() {
-        let mut completions = CompletionState::default();
-        completions.activate();
+    fn commands_inactive_when_empty() {
+        let mut commands = VibeboxCommands::default();
+        commands.activate();
 
-        assert!(!completions.is_active());
-        assert_eq!(completions.current(), None);
+        assert!(!commands.is_active());
+        assert_eq!(commands.current(), None);
     }
 
     #[test]
