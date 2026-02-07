@@ -33,6 +33,7 @@ const SSH_GUEST_DIR: &str = "/root/.vibebox";
 const DEFAULT_SSH_USER: &str = "vibebox";
 const SSH_CONNECT_RETRIES: usize = 20;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
+const SSH_SETUP_SCRIPT: &str = include_str!("ssh.sh");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InstanceConfig {
@@ -61,7 +62,12 @@ pub fn run_with_ssh(
     let instance_dir = ensure_instance_dir(&project_root)?;
     let (ssh_key, _ssh_pub) = ensure_ssh_keypair(&instance_dir)?;
 
-    let config = load_or_create_instance_config(&instance_dir)?;
+    let mut config = load_or_create_instance_config(&instance_dir)?;
+    // Clear cached IP to avoid reusing a stale address on startup.
+    if config.vm_ipv4.is_some() {
+        config.vm_ipv4 = None;
+        write_instance_config(&instance_dir.join(INSTANCE_TOML), &config)?;
+    }
     let config = Arc::new(Mutex::new(config));
 
     let extra_shares = vec![DirectoryShare::new(
@@ -244,40 +250,15 @@ fn build_ssh_login_actions(
 
     let key_path = format!("{guest_dir}/{key_name}.pub");
 
-    let mask_cache = format!(
-        "if [ -d /root/{project_name}/.vibebox ]; then mount -t tmpfs tmpfs /root/{project_name}/.vibebox; fi"
-    );
+    let setup_script = SSH_SETUP_SCRIPT
+        .replace("__SSH_USER__", &ssh_user)
+        .replace("__SUDO_PASSWORD__", &sudo_password)
+        .replace("__PROJECT_NAME__", project_name)
+        .replace("__KEY_PATH__", &key_path);
+    let setup = vm::script_command_from_content("ssh_setup", &setup_script)
+        .expect("ssh setup script contained invalid marker");
 
-    let setup_lines = [
-        "if ! command -v sshd >/dev/null 2>&1; then apt-get update && apt-get install -y openssh-server sudo; fi",
-        "systemctl enable ssh >/dev/null 2>&1 || true",
-        &format!("id -u {ssh_user} >/dev/null 2>&1 || useradd -m -s /bin/bash {ssh_user}"),
-        &format!("echo \"{ssh_user}:{sudo_password}\" | chpasswd"),
-        &format!("usermod -aG sudo {ssh_user}"),
-        &format!("install -d -m 700 /home/{ssh_user}/.ssh"),
-        &format!("install -m 600 {key_path} /home/{ssh_user}/.ssh/authorized_keys"),
-        &format!("chown -R {ssh_user}:{ssh_user} /home/{ssh_user}/.ssh"),
-        "mkdir -p /etc/ssh/sshd_config.d",
-        "cat >/etc/ssh/sshd_config.d/vibebox.conf <<'VIBEBOX_SSHD'",
-        "PasswordAuthentication no",
-        "KbdInteractiveAuthentication no",
-        "ChallengeResponseAuthentication no",
-        "PubkeyAuthentication yes",
-        "PermitRootLogin no",
-        &format!("AllowUsers {ssh_user}"),
-        "VIBEBOX_SSHD",
-        "systemctl restart ssh",
-        "echo VIBEBOX_SSH_READY",
-    ];
-    let setup = setup_lines.join("\n");
-
-    let ip_probe = "while true; do ip=$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -n 1); if [ -n \"$ip\" ]; then echo VIBEBOX_IPV4=$ip; break; fi; sleep 1; done";
-
-    vec![
-        LoginAction::Send(mask_cache),
-        LoginAction::Send(setup),
-        LoginAction::Send(ip_probe.to_string()),
-    ]
+    vec![LoginAction::Send(setup)]
 }
 
 fn spawn_ssh_io(

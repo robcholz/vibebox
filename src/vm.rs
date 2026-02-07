@@ -415,7 +415,7 @@ fn script_command_from_path(
     script_command_from_content(&label, &script)
 }
 
-fn script_command_from_content(
+pub(crate) fn script_command_from_content(
     label: &str,
     script: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -725,7 +725,12 @@ where
         Error,
     }
 
-    fn poll_with_wakeup<'a>(main_fd: RawFd, wakeup_fd: RawFd, buf: &'a mut [u8]) -> PollResult<'a> {
+    fn poll_with_wakeup<'a>(
+        main_fd: RawFd,
+        wakeup_fd: RawFd,
+        buf: &'a mut [u8],
+        timeout_ms: i32,
+    ) -> PollResult<'a> {
         let mut fds = [
             libc::pollfd {
                 fd: main_fd,
@@ -739,8 +744,12 @@ where
             },
         ];
 
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-        if ret <= 0 || fds[1].revents & libc::POLLIN != 0 {
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout_ms) };
+        if ret == 0 {
+            PollResult::Spurious
+        } else if ret < 0 {
+            PollResult::Error
+        } else if fds[1].revents & libc::POLLIN != 0 {
             PollResult::Shutdown
         } else if fds[0].revents & libc::POLLIN != 0 {
             let n = unsafe { libc::read(main_fd, buf.as_mut_ptr() as *mut _, buf.len()) };
@@ -786,7 +795,12 @@ where
                     continue;
                 }
 
-                match poll_with_wakeup(libc::STDIN_FILENO, wakeup_read.as_raw_fd(), &mut buf) {
+                match poll_with_wakeup(
+                    libc::STDIN_FILENO,
+                    wakeup_read.as_raw_fd(),
+                    &mut buf,
+                    -1,
+                ) {
                     PollResult::Shutdown | PollResult::Error => break,
                     PollResult::Spurious => continue,
                     PollResult::Ready(bytes) => {
@@ -839,7 +853,12 @@ where
                     let mut guard = raw_guard.lock().unwrap();
                     *guard = None;
                 }
-                match poll_with_wakeup(vm_output_fd.as_raw_fd(), wakeup_read.as_raw_fd(), &mut buf)
+                match poll_with_wakeup(
+                    vm_output_fd.as_raw_fd(),
+                    wakeup_read.as_raw_fd(),
+                    &mut buf,
+                    100,
+                )
                 {
                     PollResult::Shutdown | PollResult::Error => break,
                     PollResult::Spurious => continue,
