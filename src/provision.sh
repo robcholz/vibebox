@@ -15,13 +15,35 @@ apt-get install -y --no-install-recommends      \
         git                                     \
         ripgrep                                 \
         openssh-server                          \
+        locales                                 \
         sudo
 
 # Set hostname to "vibe" so it's clear that you're inside the VM.
 hostnamectl set-hostname vibe
 
-# Enable SSH server so instances can use key-based auth.
+# Locale (fix: setlocale: LC_CTYPE ... UTF-8)
+sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+locale-gen
+update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+# SSH: host keys + base config (doesn't depend on runtime user)
+ssh-keygen -A
+mkdir -p /etc/ssh/sshd_config.d
+cat >/etc/ssh/sshd_config.d/10-vibebox-base.conf <<'EOF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+PermitRootLogin no
+
+# Speed up logins / avoid DNS delays
+UseDNS no
+GSSAPIAuthentication no
+EOF
+
+sshd -t
 systemctl enable ssh
+systemctl restart ssh
 
 # Set this env var so claude doesn't complain about running as root.'
 echo "export IS_SANDBOX=1" >> .bashrc

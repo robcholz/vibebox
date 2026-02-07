@@ -31,7 +31,7 @@ const SSH_KEY_NAME: &str = "ssh_key";
 const SERIAL_LOG_NAME: &str = "serial.log";
 const SSH_GUEST_DIR: &str = "/root/.vibebox";
 const DEFAULT_SSH_USER: &str = "vibebox";
-const SSH_CONNECT_RETRIES: usize = 20;
+const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
 const SSH_SETUP_SCRIPT: &str = include_str!("ssh.sh");
 
