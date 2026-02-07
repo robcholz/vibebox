@@ -209,17 +209,11 @@ where
 
         // Add default shares, if they exist
         for share in [
-            DirectoryShare::new(home.join(".m2"), "/root/.m2".into(), false),
-            DirectoryShare::new(
-                home.join(".cargo/registry"),
-                "/root/.cargo/registry".into(),
-                false,
-            ),
-            DirectoryShare::new(home.join(".codex"), "/root/.codex".into(), false),
-            DirectoryShare::new(home.join(".claude"), "/root/.claude".into(), false),
+            DirectoryShare::new(home.join(".codex"), "/usr/local/codex".into(), false),
+            DirectoryShare::new(home.join(".claude"), "/usr/local/claude".into(), false),
             DirectoryShare::new(
                 "/Users/zhangjie/Documents/Code/CompletePrograms/vibebox/.ssh".into(),
-                "/root/.ssh".into(),
+                "/usr/local/ssh".into(),
                 true,
             ),
         ]

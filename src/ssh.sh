@@ -63,6 +63,45 @@ fi
 install -d -m 700 -o "$SSH_USER" -g "$SSH_USER" "/home/${SSH_USER}/.ssh"
 install -m 600 -o "$SSH_USER" -g "$SSH_USER" "$KEY_PATH" "/home/${SSH_USER}/.ssh/authorized_keys"
 
+# Ensure codex/claude are visible in the user's HOME
+USER_HOME="$(getent passwd "$SSH_USER" | cut -d: -f6 2>/dev/null || true)"
+if [ -z "$USER_HOME" ]; then
+  USER_HOME="/home/${SSH_USER}"
+fi
+install -d -m 755 /usr/local/codex /usr/local/claude
+if [ ! -e "${USER_HOME}/.codex" ]; then
+  ln -s /usr/local/codex "${USER_HOME}/.codex"
+fi
+if [ ! -e "${USER_HOME}/.claude" ]; then
+  ln -s /usr/local/claude "${USER_HOME}/.claude"
+fi
+chown -h "${SSH_USER}:${SSH_USER}" "${USER_HOME}/.codex" "${USER_HOME}/.claude" 2>/dev/null || true
+
+# Install Mise
+curl https://mise.run | sh
+echo 'eval "$(~/.local/bin/mise activate bash)"' >> "${USER_HOME}/.bashrc"
+
+export PATH="${USER_HOME}/.local/bin:$PATH"
+
+mkdir -p "${USER_HOME}/.config/mise"
+
+cat > "${USER_HOME}/.config/mise/config.toml" <<MISE
+    [settings]
+    # Always use the venv created by uv, if available in directory
+    python.uv_venv_auto = true
+    experimental = true
+    idiomatic_version_file_enable_tools = ["rust"]
+
+    [tools]
+    uv = "0.9.25"
+    node = "24.13.0"
+    "npm:@openai/codex" = "latest"
+    "npm:@anthropic-ai/claude-code" = "latest"
+MISE
+
+touch "${USER_HOME}/.config/mise/mise.lock"
+mise install
+
 # 3) start ssh (don't swallow failures)
 # If ssh is already active, don't force start/restart.
 if ! systemctl is-active --quiet ssh; then
