@@ -11,8 +11,7 @@ use crate::config::CONFIG_FILENAME;
 pub const INSTANCE_DIR_NAME: &str = ".vibebox";
 pub const GLOBAL_CACHE_DIR_NAME: &str = "vibebox";
 pub const GLOBAL_DIR_NAME: &str = ".vibebox";
-pub const INSTANCE_TOML_FILENAME: &str = "instance.toml";
-pub const SESSION_TEMP_PREFIX: &str = "sessions";
+pub const INSTANCE_FILENAME: &str = "instance.toml";
 pub const SESSION_TOML_SUFFIX: &str = ".toml";
 const SESSIONS_DIR_NAME: &str = "sessions";
 
@@ -100,7 +99,8 @@ impl SessionManager {
             } else {
                 tracing::warn!(
                     directory = %directory.display(),
-                    "missing session id in instance.toml"
+                    file = INSTANCE_FILENAME,
+                    "missing session id in instance file"
                 );
             }
         }
@@ -158,7 +158,7 @@ impl SessionManager {
     }
 
     fn session_path_for(&self, id: &str) -> PathBuf {
-        let filename = format!("{id}.toml");
+        let filename = format!("{id}{SESSION_TOML_SUFFIX}");
         self.sessions_dir.join(filename)
     }
 
@@ -225,9 +225,7 @@ fn read_session_file(path: &Path) -> Result<SessionEntry, SessionError> {
 }
 
 fn read_instance_metadata(directory: &Path) -> Result<InstanceMetadata, SessionError> {
-    let instance_path = directory
-        .join(INSTANCE_DIR_NAME)
-        .join(INSTANCE_TOML_FILENAME);
+    let instance_path = directory.join(INSTANCE_DIR_NAME).join(INSTANCE_FILENAME);
     if !instance_path.exists() {
         return Ok(InstanceMetadata::default());
     }
@@ -256,7 +254,7 @@ fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 
     fs::create_dir_all(parent)?;
     let mut temp = tempfile::Builder::new()
-        .prefix(SESSION_TEMP_PREFIX)
+        .prefix(SESSIONS_DIR_NAME)
         .suffix(SESSION_TOML_SUFFIX)
         .tempfile_in(parent)?;
     temp.write_all(content)?;
@@ -285,7 +283,7 @@ mod tests {
         let instance_dir = project_dir.join(INSTANCE_DIR_NAME);
         fs::create_dir_all(&instance_dir).unwrap();
         let content = format!("id = \"{id}\"\nlast_active = \"{last_active}\"\n");
-        fs::write(instance_dir.join(INSTANCE_TOML_FILENAME), content).unwrap();
+        fs::write(instance_dir.join(INSTANCE_FILENAME), content).unwrap();
     }
 
     #[test]
@@ -306,9 +304,10 @@ mod tests {
         assert_eq!(dirs[0], project_dir.canonicalize().unwrap());
         assert!(mgr.index_path().exists());
 
-        let session_path = mgr
-            .index_path()
-            .join("019bf290-cccc-7c23-ba1d-dce7e6d40693.toml");
+        let session_path = mgr.index_path().join(format!(
+            "019bf290-cccc-7c23-ba1d-dce7e6d40693{}",
+            SESSION_TOML_SUFFIX
+        ));
         assert!(session_path.exists());
     }
 
@@ -329,9 +328,10 @@ mod tests {
         let sessions = mgr.list_sessions().unwrap();
         assert!(sessions.is_empty());
 
-        let session_path = mgr
-            .index_path()
-            .join("019bf290-cccc-7c23-ba1d-dce7e6d40693.toml");
+        let session_path = mgr.index_path().join(format!(
+            "019bf290-cccc-7c23-ba1d-dce7e6d40693{}",
+            SESSION_TOML_SUFFIX
+        ));
         assert!(!session_path.exists());
     }
 
@@ -340,7 +340,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         fs::create_dir_all(mgr.index_path()).unwrap();
-        fs::write(mgr.index_path().join("bad.toml"), "not toml").unwrap();
+        fs::write(
+            mgr.index_path().join(format!("bad{SESSION_TOML_SUFFIX}")),
+            "not toml",
+        )
+        .unwrap();
 
         let err = mgr.list_sessions().unwrap_err();
         assert!(matches!(err, SessionError::TomlDe(_)));

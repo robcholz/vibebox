@@ -20,14 +20,14 @@ use uuid::Uuid;
 
 use crate::{
     commands,
-    session_manager::{INSTANCE_DIR_NAME, INSTANCE_TOML_FILENAME},
+    session_manager::{INSTANCE_DIR_NAME, INSTANCE_FILENAME},
     tui::AppState,
     vm::{self, LoginAction, VmInput},
 };
 
 const SSH_KEY_NAME: &str = "ssh_key";
 #[allow(dead_code)]
-const SERIAL_LOG_NAME: &str = "serial.log";
+pub(crate) const SERIAL_LOG_NAME: &str = "serial.log";
 const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
@@ -126,7 +126,7 @@ pub(crate) fn ensure_ssh_keypair(
 pub(crate) fn load_or_create_instance_config(
     instance_dir: &Path,
 ) -> Result<InstanceConfig, Box<dyn std::error::Error>> {
-    let config_path = instance_dir.join(INSTANCE_TOML_FILENAME);
+    let config_path = instance_dir.join(INSTANCE_FILENAME);
     let mut config = if config_path.exists() {
         let raw = fs::read_to_string(&config_path)?;
         toml::from_str::<InstanceConfig>(&raw)?
@@ -167,7 +167,7 @@ pub fn touch_last_active(instance_dir: &Path) -> Result<(), Box<dyn std::error::
     let mut config = load_or_create_instance_config(instance_dir)?;
     let now = OffsetDateTime::now_utc().format(&Rfc3339)?;
     config.last_active = Some(now);
-    write_instance_config(&instance_dir.join(INSTANCE_TOML_FILENAME), &config)?;
+    write_instance_config(&instance_dir.join(INSTANCE_FILENAME), &config)?;
     Ok(())
 }
 
@@ -379,7 +379,7 @@ fn spawn_ssh_io(
     let ssh_ready = Arc::new(AtomicBool::new(false));
     let input_tx_holder: Arc<Mutex<Option<Sender<VmInput>>>> = Arc::new(Mutex::new(None));
 
-    let instance_path = instance_dir.join(INSTANCE_TOML_FILENAME);
+    let instance_path = instance_dir.join(INSTANCE_FILENAME);
     let config_for_output = config.clone();
     let log_for_output = log_file.clone();
     let ssh_connected_for_output = ssh_connected.clone();

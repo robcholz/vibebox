@@ -15,16 +15,18 @@ use std::{
 };
 
 use crate::{
+    instance::SERIAL_LOG_NAME,
     instance::{
         InstanceConfig, build_ssh_login_actions, ensure_instance_dir, ensure_ssh_keypair,
         extract_ipv4, load_or_create_instance_config, write_instance_config,
     },
-    session_manager::GLOBAL_DIR_NAME,
+    session_manager::{GLOBAL_DIR_NAME, INSTANCE_FILENAME},
     vm::{self, DirectoryShare, LoginAction, VmInput},
 };
 
 const VM_MANAGER_SOCKET_NAME: &str = "vm.sock";
 const VM_MANAGER_LOCK_NAME: &str = "vm.lock";
+const VM_MANAGER_LOG_NAME: &str = "vm_manager.log";
 
 pub fn ensure_manager(
     raw_args: &[std::ffi::OsString],
@@ -132,7 +134,7 @@ fn spawn_manager_process(
     cmd.env("VIBEBOX_LOG_NO_COLOR", "1");
     cmd.env("VIBEBOX_AUTO_SHUTDOWN_MS", auto_shutdown_ms.to_string());
     tracing::info!(auto_shutdown_ms, "vm manager process spawn requested");
-    let log_path = instance_dir.join("vm_manager.log");
+    let log_path = instance_dir.join(VM_MANAGER_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -280,7 +282,7 @@ fn spawn_manager_io(
     vm_output_fd: std::os::unix::io::OwnedFd,
     vm_input_fd: std::os::unix::io::OwnedFd,
 ) -> vm::IoContext {
-    let log_path = instance_dir.join("serial.log");
+    let log_path = instance_dir.join(SERIAL_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -289,7 +291,7 @@ fn spawn_manager_io(
         .ok()
         .map(|file| Arc::new(Mutex::new(file)));
 
-    let instance_path = instance_dir.join("instance.toml");
+    let instance_path = instance_dir.join(INSTANCE_FILENAME);
     let config_for_output = config.clone();
     let log_for_output = log_file.clone();
     let mut line_buf = String::new();
@@ -465,7 +467,7 @@ fn run_manager_with(
     let mut config = load_or_create_instance_config(&instance_dir)?;
     if config.vm_ipv4.is_some() {
         config.vm_ipv4 = None;
-        write_instance_config(&instance_dir.join("instance.toml"), &config)?;
+        write_instance_config(&instance_dir.join(INSTANCE_FILENAME), &config)?;
     }
     let config = Arc::new(Mutex::new(config));
 

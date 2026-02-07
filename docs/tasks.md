@@ -43,7 +43,11 @@
 6. [x] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
 7. [x] setup vibebox commands
 8. [ ] setup cli commands.
-9. [ ] fix ui overlap.
+   1. [x] Organize all the params.
+   2. [ ] Remove old cli.
+   3. [ ] add an actual config file.
+   4. [ ] set up the cli.
+9. [ ] fix ui overlap, and consistency issue.
 10. [ ] intensive integration test.
 
 ## Publish

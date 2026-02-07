@@ -43,6 +43,10 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVISION_SCRIPT: &str = include_str!("provision.sh");
+const PROVISION_SCRIPT_NAME: &str = "provision.sh";
+const DEFAULT_RAW_NAME: &str = "default.raw";
+const INSTANCE_RAW_NAME: &str = "instance.raw";
+const BASE_DISK_RAW_NAME: &str = "disk.raw";
 
 #[derive(Clone)]
 pub(crate) enum LoginAction {
@@ -158,8 +162,8 @@ where
         basename_compressed.trim_end_matches(".tar.xz")
     ));
 
-    let default_raw = cache_dir.join("default.raw");
-    let instance_raw = instance_dir.join("instance.raw");
+    let default_raw = cache_dir.join(DEFAULT_RAW_NAME);
+    let instance_raw = instance_dir.join(INSTANCE_RAW_NAME);
 
     // Prepare system-wide directories
     fs::create_dir_all(&cache_dir)?;
@@ -212,11 +216,6 @@ where
         for share in [
             DirectoryShare::new(home.join(".codex"), "/usr/local/codex".into(), false),
             DirectoryShare::new(home.join(".claude"), "/usr/local/claude".into(), false),
-            DirectoryShare::new(
-                "/Users/zhangjie/Documents/Code/CompletePrograms/vibebox/.ssh".into(),
-                "/usr/local/ssh".into(),
-                true,
-            ),
         ]
         .into_iter()
         .flatten()
@@ -629,7 +628,11 @@ fn ensure_base_image(
 
     println!("Decompressing base image...");
     let status = Command::new("tar")
-        .args(["-xOf", &base_compressed.to_string_lossy(), "disk.raw"])
+        .args([
+            "-xOf",
+            &base_compressed.to_string_lossy(),
+            BASE_DISK_RAW_NAME,
+        ])
         .stdout(std::fs::File::create(base_raw)?)
         .status()?;
 
@@ -655,7 +658,7 @@ fn ensure_default_image(
     println!("Configuring base image...");
     fs::copy(base_raw, default_raw)?;
 
-    let provision_command = script_command_from_content("provision.sh", PROVISION_SCRIPT)?;
+    let provision_command = script_command_from_content(PROVISION_SCRIPT_NAME, PROVISION_SCRIPT)?;
     run_vm(
         default_raw,
         &[Send(provision_command)],
