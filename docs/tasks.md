@@ -33,9 +33,22 @@
 2. [x] Fix the input field that does not expand its height (currently, it just roll the text horizontally). The
    inputfield it should not be scrollable.
 
-## Integration
+## Stage 1
 
 1. [x] Wire up the vm and tui.
 2. [x] Use ssh to connect to vm.
-3. [ ] wire up SessionManager.
-4. [ ] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
+3. [x] allow multi vibebox to connect to the same vm.
+4. [ ] use vm.lock to ensure process concurrency safety.
+5. [ ] wire up SessionManager.
+6. [ ] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
+7. [ ] setup vibebox commands
+8. [ ] setup cli commands.
+9. [ ] fix ui overlap.
+
+## Publish
+
+1. [ ] write the docs
+2. [ ] setup quick link.
+3. [ ] setup website.
+
+[ ]

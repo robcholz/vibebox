@@ -1,0 +1,14 @@
+flowchart TD
+  VB[Vibebox] --> SM[Session Manager]
+
+  SM --> VMM1[VM Manager #1]
+  SM --> VMM2[VM Manager #2]
+  SM --> VMM3[VM Manager #N]
+
+  VMM1 --> VMI1[VM Instance #1]
+  VMM2 --> VMI2[VM Instance #2]
+  VMM3 --> VMIN[VM Instance #N]
+
+  VMI1 --> VM1[VM #1]
+  VMI2 --> VM2[VM #2]
+  VMIN --> VMN[VM #N]

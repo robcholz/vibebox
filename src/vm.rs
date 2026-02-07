@@ -1358,6 +1358,9 @@ impl Drop for RawModeGuard {
 
 // Ensure the running binary has com.apple.security.virtualization entitlements by checking and, if not, signing and relaunching.
 pub fn ensure_signed() {
+    if std::env::var("VIBEBOX_SKIP_CODESIGN").as_deref() == Ok("1") {
+        return;
+    }
     let exe = std::env::current_exe().expect("failed to get current exe path");
     let exe_str = exe.to_str().expect("exe path not valid utf-8");
 
