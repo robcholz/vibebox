@@ -1,0 +1,7 @@
+[box]
+cpu_count = 2
+ram_mb = 2048
+mounts = []
+
+[supervisor]
+auto_shutdown_ms = 20000
