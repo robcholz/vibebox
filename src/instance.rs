@@ -27,7 +27,7 @@ use crate::{
 
 const SSH_KEY_NAME: &str = "ssh_key";
 pub(crate) const SERIAL_LOG_NAME: &str = "serial.log";
-const DEFAULT_SSH_USER: &str = "vibecoder";
+pub(crate) const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
 const SSH_SETUP_SCRIPT: &str = include_str!("ssh.sh");
@@ -179,6 +179,15 @@ pub fn read_instance_vm_ip(
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let config = read_instance_config(instance_dir)?;
     Ok(config.and_then(|cfg| cfg.vm_ipv4))
+}
+
+pub fn read_instance_ssh_user(
+    instance_dir: &Path,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let config = read_instance_config(instance_dir)?;
+    Ok(config
+        .map(|cfg| cfg.ssh_user)
+        .filter(|user| !user.trim().is_empty()))
 }
 
 pub fn touch_last_active(instance_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {

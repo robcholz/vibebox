@@ -63,19 +63,10 @@ fi
 install -d -m 700 -o "$SSH_USER" -g "$SSH_USER" "/home/${SSH_USER}/.ssh"
 install -m 600 -o "$SSH_USER" -g "$SSH_USER" "$KEY_PATH" "/home/${SSH_USER}/.ssh/authorized_keys"
 
-# Ensure codex/claude are visible in the user's HOME
 USER_HOME="$(getent passwd "$SSH_USER" | cut -d: -f6 2>/dev/null || true)"
 if [ -z "$USER_HOME" ]; then
   USER_HOME="/home/${SSH_USER}"
 fi
-install -d -m 755 /usr/local/codex /usr/local/claude
-if [ ! -e "${USER_HOME}/.codex" ]; then
-  ln -s /usr/local/codex "${USER_HOME}/.codex"
-fi
-if [ ! -e "${USER_HOME}/.claude" ]; then
-  ln -s /usr/local/claude "${USER_HOME}/.claude"
-fi
-chown -h "${SSH_USER}:${SSH_USER}" "${USER_HOME}/.codex" "${USER_HOME}/.claude" 2>/dev/null || true
 
 # Vibebox shell commands
 install -d -m 755 /etc/profile.d

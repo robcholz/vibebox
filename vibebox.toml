@@ -2,8 +2,8 @@
 cpu_count = 2
 ram_mb = 2048
 mounts = [
-    "~/.codex:/usr/local/codex:read-write",
-    "~/.claude:/usr/local/claude:read-write",
+    "~/.codex:~/.codex:read-write",
+    "~/.claude:~/.claude:read-write",
 ]
 
 [supervisor]

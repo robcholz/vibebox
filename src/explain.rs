@@ -12,8 +12,9 @@ pub fn build_mount_rows(
 ) -> Result<Vec<tui::MountListRow>, Box<dyn Error + Send + Sync>> {
     let mut rows = Vec::new();
     rows.extend(default_mounts(cwd)?);
+    let guest_home = resolve_guest_home(cwd)?;
     for spec in &config.box_cfg.mounts {
-        rows.push(parse_mount_spec(cwd, spec, false)?);
+        rows.push(parse_mount_spec(cwd, spec, false, &guest_home)?);
     }
     Ok(rows)
 }
@@ -75,6 +76,7 @@ fn parse_mount_spec(
     cwd: &Path,
     spec: &str,
     default_mount: bool,
+    guest_home: &str,
 ) -> Result<tui::MountListRow, Box<dyn Error + Send + Sync>> {
     let parts: Vec<&str> = spec.split(':').collect();
     if parts.len() < 2 || parts.len() > 3 {
@@ -99,11 +101,7 @@ fn parse_mount_spec(
     };
 
     let host_display = display_host_spec(cwd, host_part);
-    let guest_display = if Path::new(guest_part).is_absolute() {
-        guest_part.to_string()
-    } else {
-        format!("/root/{guest_part}")
-    };
+    let guest_display = resolve_guest_display(guest_part, guest_home);
     Ok(tui::MountListRow {
         host: host_display,
         guest: guest_display,
@@ -125,6 +123,36 @@ fn display_host_spec(cwd: &Path, host: &str) -> String {
         display_path(&candidate)
     } else {
         host.to_string()
+    }
+}
+
+fn resolve_guest_home(cwd: &Path) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let instance_dir = cwd.join(session_manager::INSTANCE_DIR_NAME);
+    if let Ok(Some(user)) = instance::read_instance_ssh_user(&instance_dir) {
+        return Ok(format!("/home/{user}"));
+    }
+    Ok(format!("/home/{}", instance::DEFAULT_SSH_USER))
+}
+
+fn resolve_guest_display(guest: &str, guest_home: &str) -> String {
+    if guest == "~" {
+        return "~".to_string();
+    }
+    if let Some(stripped) = guest.strip_prefix("~/") {
+        return format!("~/{stripped}");
+    }
+    if Path::new(guest).is_absolute() {
+        if let Ok(stripped) = Path::new(guest).strip_prefix(guest_home) {
+            if stripped.components().next().is_none() {
+                "~".to_string()
+            } else {
+                format!("~/{}", stripped.display())
+            }
+        } else {
+            guest.to_string()
+        }
+    } else {
+        format!("/root/{guest}")
     }
 }
 

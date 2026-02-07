@@ -81,11 +81,11 @@ fn default_mounts() -> Vec<String> {
     let mut mounts = Vec::new();
     let codex_host = home.join(".codex");
     if codex_host.exists() {
-        mounts.push("~/.codex:/usr/local/codex:read-write".to_string());
+        mounts.push("~/.codex:/home/vibecoder/.codex:read-write".to_string());
     }
     let claude_host = home.join(".claude");
     if claude_host.exists() {
-        mounts.push("~/.claude:/usr/local/claude:read-write".to_string());
+        mounts.push("~/.claude:/home/vibecoder/.claude:read-write".to_string());
     }
     mounts
 }
