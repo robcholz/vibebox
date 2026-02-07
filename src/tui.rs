@@ -50,11 +50,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(cwd: PathBuf, vm_info: VmInfo) -> Self {
-        let mut commands = VibeboxCommands::default();
-        commands.add_command(":new", "Create a new session.");
-        commands.add_command(":exit", "Exit Vibebox.");
-
+    pub fn new(cwd: PathBuf, vm_info: VmInfo, commands: VibeboxCommands) -> Self {
         Self {
             cwd,
             vm_info,
@@ -69,6 +65,10 @@ pub struct VibeboxCommands {
 }
 
 impl VibeboxCommands {
+    pub fn new_empty() -> Self {
+        Self { items: Vec::new() }
+    }
+
     pub fn add_command(&mut self, name: impl Into<String>, description: impl Into<String>) {
         self.items.push(VibeboxCommand {
             name: name.into(),

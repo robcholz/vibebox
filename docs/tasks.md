@@ -41,7 +41,7 @@
 4. [x] use vm.lock to ensure process concurrency safety.
 5. [x] wire up SessionManager.
 6. [x] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
-7. [ ] setup vibebox commands
+7. [x] setup vibebox commands
 8. [ ] setup cli commands.
 9. [ ] fix ui overlap.
 10. [ ] intensive integration test.

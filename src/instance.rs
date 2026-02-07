@@ -19,8 +19,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
+    commands,
     session_manager::{INSTANCE_DIR_NAME, INSTANCE_TOML_FILENAME},
-    tui::{self, AppState},
+    tui::AppState,
     vm::{self, LoginAction, VmInput},
 };
 
@@ -344,7 +345,8 @@ pub(crate) fn build_ssh_login_actions(
         .replace("__SSH_USER__", &ssh_user)
         .replace("__SUDO_PASSWORD__", &sudo_password)
         .replace("__PROJECT_NAME__", project_name)
-        .replace("__KEY_PATH__", &key_path);
+        .replace("__KEY_PATH__", &key_path)
+        .replace("__VIBEBOX_SHELL_SCRIPT__", &commands::render_shell_script());
     let setup = vm::script_command_from_content("ssh_setup", &setup_script)
         .expect("ssh setup script contained invalid marker");
 
@@ -385,18 +387,8 @@ fn spawn_ssh_io(
 
     let mut line_buf = String::new();
 
-    let on_line = {
-        let app = app.clone();
-        move |line: &str| {
-            if line == ":help" {
-                if let Ok(mut locked) = app.lock() {
-                    let _ = tui::render_commands_component(&mut locked);
-                }
-                return true;
-            }
-            false
-        }
-    };
+    let handlers = commands::build_handlers(app.clone(), io_control.clone());
+    let on_line = move |line: &str| handlers.handle(line);
 
     let on_output = move |bytes: &[u8]| {
         if ssh_connected_for_output.load(Ordering::SeqCst) {

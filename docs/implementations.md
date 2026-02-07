@@ -68,7 +68,6 @@ In host cli:
 
 In vibebox:
 
-- use `:new` to prompt user to delete and create a session.
 - use `:exit` to exit vibebox.
 
 ### (Shows all the mounts/network/visibility)
