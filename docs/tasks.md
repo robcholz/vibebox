@@ -38,7 +38,7 @@
 1. [x] Wire up the vm and tui.
 2. [x] Use ssh to connect to vm.
 3. [x] allow multi vibebox to connect to the same vm.
-4. [ ] use vm.lock to ensure process concurrency safety.
+4. [x] use vm.lock to ensure process concurrency safety.
 5. [ ] wire up SessionManager.
 6. [ ] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
 7. [ ] setup vibebox commands
@@ -50,5 +50,11 @@
 1. [ ] write the docs
 2. [ ] setup quick link.
 3. [ ] setup website.
+
+## Stage 2
+
+1. [ ] Redirect vm output to log.
+2. [ ] Redirect vm output to vibebox starting it.
+3. [ ] use anyhow to sync api.
 
 [ ]
