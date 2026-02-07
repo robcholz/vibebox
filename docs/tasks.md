@@ -44,7 +44,7 @@
 7. [x] setup vibebox commands
 8. [ ] setup cli commands.
    1. [x] Organize all the params.
-   2. [ ] Remove old cli.
+   2. [x] Remove old cli.
    3. [ ] add an actual config file.
    4. [ ] set up the cli.
 9. [ ] fix ui overlap, and consistency issue.

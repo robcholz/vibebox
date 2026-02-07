@@ -26,7 +26,6 @@ use crate::{
 };
 
 const SSH_KEY_NAME: &str = "ssh_key";
-#[allow(dead_code)]
 pub(crate) const SERIAL_LOG_NAME: &str = "serial.log";
 const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
@@ -353,7 +352,6 @@ pub(crate) fn build_ssh_login_actions(
     vec![LoginAction::Send(setup)]
 }
 
-#[allow(dead_code)]
 fn spawn_ssh_io(
     app: Arc<Mutex<AppState>>,
     config: Arc<Mutex<InstanceConfig>>,

@@ -21,7 +21,13 @@ fn main() -> Result<()> {
 
     if env::var("VIBEBOX_VM_MANAGER").as_deref() == Ok("1") {
         tracing::info!("starting vm manager mode");
-        let args = vm::parse_cli().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+        // TODO: wire CLI args into VmArg once we reintroduce CLI parsing.
+        let args = vm::VmArg {
+            cpu_count: 2,
+            ram_bytes: 2048 * 1024 * 1024,
+            no_default_mounts: false,
+            mounts: Vec::new(),
+        };
         let auto_shutdown_ms = env::var("VIBEBOX_AUTO_SHUTDOWN_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -34,23 +40,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let args = vm::parse_cli().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
-    tracing::debug!("parsed cli args");
-    if args.version() {
-        vm::print_version();
-        return Ok(());
-    }
-    if args.help() {
-        vm::print_help();
-        return Ok(());
-    }
-
     vm::ensure_signed();
+
+    // TODO: wire CLI args into VmArg once we reintroduce CLI parsing.
+    let vm_args = vm::VmArg {
+        cpu_count: 2,
+        ram_bytes: 2048 * 1024 * 1024,
+        no_default_mounts: false,
+        mounts: Vec::new(),
+    };
 
     let vm_info = VmInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        max_memory_mb: args.ram_mb(),
-        cpu_cores: args.cpu_count(),
+        max_memory_mb: vm_args.ram_bytes / (1024 * 1024),
+        cpu_cores: vm_args.cpu_count,
     };
     let cwd = env::current_dir().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
     tracing::info!(cwd = %cwd.display(), "starting vibebox cli");

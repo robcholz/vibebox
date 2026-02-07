@@ -19,7 +19,13 @@ fn main() -> Result<()> {
     let instance_dir = instance::ensure_instance_dir(&cwd)
         .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
     let _ = instance::touch_last_active(&instance_dir);
-    let args = vm::parse_cli().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    // TODO: wire CLI args into VmArg once we reintroduce CLI parsing.
+    let args = vm::VmArg {
+        cpu_count: 2,
+        ram_bytes: 2048 * 1024 * 1024,
+        no_default_mounts: false,
+        mounts: Vec::new(),
+    };
     let auto_shutdown_ms = env::var("VIBEBOX_AUTO_SHUTDOWN_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())

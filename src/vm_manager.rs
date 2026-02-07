@@ -91,7 +91,7 @@ pub fn ensure_manager(
 }
 
 pub fn run_manager(
-    args: vm::CliArgs,
+    args: vm::VmArg,
     auto_shutdown_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let project_root = env::current_dir()?;
@@ -392,7 +392,7 @@ struct ManagerOptions {
 trait VmExecutor {
     fn run_vm(
         &self,
-        args: vm::CliArgs,
+        args: vm::VmArg,
         extra_login_actions: Vec<LoginAction>,
         extra_shares: Vec<DirectoryShare>,
         config: Arc<Mutex<InstanceConfig>>,
@@ -406,7 +406,7 @@ struct RealVmExecutor;
 impl VmExecutor for RealVmExecutor {
     fn run_vm(
         &self,
-        args: vm::CliArgs,
+        args: vm::VmArg,
         extra_login_actions: Vec<LoginAction>,
         extra_shares: Vec<DirectoryShare>,
         config: Arc<Mutex<InstanceConfig>>,
@@ -435,7 +435,7 @@ impl VmExecutor for RealVmExecutor {
 
 fn run_manager_with(
     project_root: &Path,
-    args: vm::CliArgs,
+    args: vm::VmArg,
     auto_shutdown_ms: u64,
     executor: &dyn VmExecutor,
     options: ManagerOptions,
