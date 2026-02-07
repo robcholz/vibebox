@@ -79,12 +79,13 @@ fn main() -> Result<()> {
         mounts: config.box_cfg.mounts.clone(),
     };
 
+    let auto_shutdown_ms = config.supervisor.auto_shutdown_ms;
     let vm_info = VmInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
         max_memory_mb: vm_args.ram_bytes / (1024 * 1024),
         cpu_cores: vm_args.cpu_count,
+        system_name: "Debian".to_string(), // TODO: read system name from the VM.
+        auto_shutdown_ms,
     };
-    let auto_shutdown_ms = config.supervisor.auto_shutdown_ms;
     if let Ok(manager) = SessionManager::new() {
         if let Err(err) = manager.update_global_sessions(&cwd) {
             tracing::warn!(error = %err, "failed to update a global session list");

@@ -34,12 +34,14 @@ const ASCII_BANNER: [&str; 7] = [
     "  ╚═══╝  ╚═╝╚═════╝ ╚══════╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝",
     "",
 ];
+const INFO_LINE_COUNT: u16 = 5;
 
 #[derive(Debug, Clone)]
 pub struct VmInfo {
-    pub version: String,
     pub max_memory_mb: u64,
     pub cpu_cores: usize,
+    pub system_name: String,
+    pub auto_shutdown_ms: u64,
 }
 
 #[derive(Debug)]
@@ -155,8 +157,12 @@ fn compute_page_layout(app: &AppState, width: u16) -> PageLayout {
 fn header_height() -> u16 {
     let banner_height = ASCII_BANNER.len() as u16;
     let welcome_height = 1;
-    let info_height = 4;
+    let info_height = info_block_height();
     welcome_height + banner_height + info_height
+}
+
+fn info_block_height() -> u16 {
+    INFO_LINE_COUNT.saturating_add(1)
 }
 
 pub fn render_tui_once(app: &mut AppState) -> Result<()> {
@@ -532,13 +538,15 @@ fn render_header(buffer: &mut Buffer, area: Rect, app: &AppState) {
         .constraints([
             Constraint::Length(1),
             Constraint::Length(ASCII_BANNER.len() as u16),
-            Constraint::Length(4),
+            Constraint::Length(info_block_height()),
         ])
         .split(area);
 
+    let version = env!("CARGO_PKG_VERSION");
+
     let welcome = Line::from(vec![
         Span::raw("Welcome to Vibebox v"),
-        Span::styled(&app.vm_info.version, Style::default().fg(Color::Yellow)),
+        Span::styled(version, Style::default().fg(Color::Yellow)),
     ]);
 
     Paragraph::new(welcome).render(header_chunks[0], buffer);
@@ -557,8 +565,8 @@ fn render_header(buffer: &mut Buffer, area: Rect, app: &AppState) {
             Span::styled(app.cwd.to_string_lossy(), Style::default().fg(Color::Cyan)),
         ]),
         Line::from(vec![
-            Span::raw("VM Version: "),
-            Span::styled(&app.vm_info.version, Style::default().fg(Color::Green)),
+            Span::raw("System: "),
+            Span::styled(&app.vm_info.system_name, Style::default().fg(Color::Green)),
         ]),
         Line::from(vec![
             Span::raw("CPU / Memory: "),
@@ -567,6 +575,13 @@ fn render_header(buffer: &mut Buffer, area: Rect, app: &AppState) {
                     "{} cores / {} MB",
                     app.vm_info.cpu_cores, app.vm_info.max_memory_mb
                 ),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Auto Shutdown: "),
+            Span::styled(
+                format!("{} ms", app.vm_info.auto_shutdown_ms),
                 Style::default().fg(Color::Green),
             ),
         ]),
