@@ -34,7 +34,7 @@ Example:
 Each session has the following members:
 
 - `id`: session id
-- `directory`: project directory (absolute)
+- `directory`: project directory (absolute), if directory changes name, this should also change.
 - `last_active`: utc time indicating the last active time for the session
 
 Sessions info are stored in `~/.vibebox/sessions.toml`

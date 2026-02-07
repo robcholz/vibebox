@@ -1,3 +1,4 @@
+use crate::session_manager::INSTANCE_DIR_NAME;
 use std::{
     env,
     ffi::OsString,
@@ -148,7 +149,7 @@ where
     let cache_dir = cache_home.join("vibe");
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
 
-    let instance_dir = project_root.join(".vibe");
+    let instance_dir = project_root.join(INSTANCE_DIR_NAME);
 
     let basename_compressed = DEBIAN_COMPRESSED_DISK_URL.rsplit('/').next().unwrap();
     let base_compressed = cache_dir.join(basename_compressed);

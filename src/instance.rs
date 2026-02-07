@@ -17,7 +17,7 @@ use std::sync::mpsc::Sender;
 use uuid::Uuid;
 
 use crate::{
-    session_manager::INSTANCE_DIR_NAME,
+    session_manager::{GLOBAL_DIR_NAME, INSTANCE_DIR_NAME},
     tui::{self, AppState},
     vm::{self, DirectoryShare, LoginAction, VmInput},
 };
@@ -25,7 +25,6 @@ use crate::{
 const INSTANCE_TOML: &str = "instance.toml";
 const SSH_KEY_NAME: &str = "ssh_key";
 const SERIAL_LOG_NAME: &str = "serial.log";
-const SSH_GUEST_DIR: &str = "/root/.vibebox";
 const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
@@ -66,14 +65,16 @@ pub fn run_with_ssh(
     }
     let config = Arc::new(Mutex::new(config));
 
+    let ssh_guest_dir = format!("/root/{}", GLOBAL_DIR_NAME);
+
     let extra_shares = vec![DirectoryShare::new(
         instance_dir.clone(),
-        SSH_GUEST_DIR.into(),
+        ssh_guest_dir.clone().into(),
         true,
     )?];
 
     let extra_login_actions =
-        build_ssh_login_actions(&config, &project_name, SSH_GUEST_DIR, SSH_KEY_NAME);
+        build_ssh_login_actions(&config, &project_name, ssh_guest_dir.as_str(), SSH_KEY_NAME);
 
     vm::run_with_args_and_extras(
         args,

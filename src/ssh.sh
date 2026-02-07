@@ -78,10 +78,13 @@ fi
 chown -h "${SSH_USER}:${SSH_USER}" "${USER_HOME}/.codex" "${USER_HOME}/.claude" 2>/dev/null || true
 
 # Install Mise
-curl https://mise.run | sh
+MISE_BIN="${USER_HOME}/.local/bin/mise"
+if [ ! -x "$MISE_BIN" ] && ! command -v mise >/dev/null 2>&1; then
+  curl https://mise.run | HOME="$USER_HOME" sh
+fi
 echo 'eval "$(~/.local/bin/mise activate bash)"' >> "${USER_HOME}/.bashrc"
 
-export PATH="${USER_HOME}/.local/bin:$PATH"
+export PATH="${USER_HOME}/.local/bin:/usr/local/bin:$PATH"
 
 mkdir -p "${USER_HOME}/.config/mise"
 
@@ -100,7 +103,11 @@ cat > "${USER_HOME}/.config/mise/config.toml" <<MISE
 MISE
 
 touch "${USER_HOME}/.config/mise/mise.lock"
-mise install
+if [ -x "$MISE_BIN" ]; then
+  HOME="$USER_HOME" "$MISE_BIN" install
+else
+  HOME="$USER_HOME" mise install
+fi
 
 # 3) start ssh (don't swallow failures)
 # If ssh is already active, don't force start/restart.
