@@ -311,7 +311,8 @@ fn run_ssh_session(
                 thread::sleep(Duration::from_millis(500));
             }
             Ok(status) => {
-                return Err(format!("ssh exited with status: {status}").into());
+                eprintln!("[vibebox] ssh exited with status: {status}");
+                break;
             }
             Err(err) => {
                 return Err(format!("failed to start ssh: {err}").into());
