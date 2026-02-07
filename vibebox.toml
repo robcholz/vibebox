@@ -7,4 +7,4 @@ mounts = [
 ]
 
 [supervisor]
-auto_shutdown_ms = 20000
+auto_shutdown_ms = 2000

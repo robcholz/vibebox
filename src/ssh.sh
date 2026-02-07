@@ -68,6 +68,9 @@ if [ -z "$USER_HOME" ]; then
   USER_HOME="/home/${SSH_USER}"
 fi
 
+# Home mount links (config-driven)
+__VIBEBOX_HOME_LINKS__
+
 # Vibebox shell commands
 install -d -m 755 /etc/profile.d
 cat > /etc/profile.d/vibebox.sh <<'VIBEBOX_SHELL_EOF'

@@ -46,6 +46,16 @@ pub(crate) struct InstanceConfig {
     pub(crate) vm_ipv4: Option<String>,
 }
 
+impl InstanceConfig {
+    pub(crate) fn ssh_user_display(&self) -> String {
+        if self.ssh_user.trim().is_empty() {
+            DEFAULT_SSH_USER.to_string()
+        } else {
+            self.ssh_user.clone()
+        }
+    }
+}
+
 fn default_ssh_user() -> String {
     DEFAULT_SSH_USER.to_string()
 }
@@ -361,6 +371,7 @@ pub(crate) fn build_ssh_login_actions(
     project_name: &str,
     guest_dir: &str,
     key_name: &str,
+    home_links_script: &str,
 ) -> Vec<LoginAction> {
     let config_guard = config.lock().expect("config mutex poisoned");
     let ssh_user = config_guard.ssh_user.clone();
@@ -374,7 +385,8 @@ pub(crate) fn build_ssh_login_actions(
         .replace("__SUDO_PASSWORD__", &sudo_password)
         .replace("__PROJECT_NAME__", project_name)
         .replace("__KEY_PATH__", &key_path)
-        .replace("__VIBEBOX_SHELL_SCRIPT__", &commands::render_shell_script());
+        .replace("__VIBEBOX_SHELL_SCRIPT__", &commands::render_shell_script())
+        .replace("__VIBEBOX_HOME_LINKS__", home_links_script);
     let setup = vm::script_command_from_content("ssh_setup", &setup_script)
         .expect("ssh setup script contained invalid marker");
 

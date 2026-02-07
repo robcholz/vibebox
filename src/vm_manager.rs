@@ -19,8 +19,8 @@ use crate::{
     config::CONFIG_PATH_ENV,
     instance::SERIAL_LOG_NAME,
     instance::{
-        InstanceConfig, build_ssh_login_actions, ensure_instance_dir, ensure_ssh_keypair,
-        extract_ipv4, load_or_create_instance_config, write_instance_config,
+        DEFAULT_SSH_USER, InstanceConfig, build_ssh_login_actions, ensure_instance_dir,
+        ensure_ssh_keypair, extract_ipv4, load_or_create_instance_config, write_instance_config,
     },
     session_manager::{
         GLOBAL_DIR_NAME, INSTANCE_FILENAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME,
@@ -205,6 +205,113 @@ fn is_socket_path(path: &Path) -> bool {
     fs::metadata(path)
         .map(|meta| meta.file_type().is_socket())
         .unwrap_or(false)
+}
+
+fn prepare_mounts_and_links(mut args: vm::VmArg, ssh_user: &str) -> (vm::VmArg, String) {
+    let mut links = Vec::new();
+    let mut mounts = Vec::with_capacity(args.mounts.len());
+    for spec in args.mounts {
+        let (rewritten, link) = rewrite_mount_spec(&spec, ssh_user);
+        if let Some(link) = link {
+            links.push(link);
+        }
+        mounts.push(rewritten);
+    }
+    args.mounts = mounts;
+    let script = render_home_links_script(&links, ssh_user);
+    (args, script)
+}
+
+struct HomeLink {
+    source: String,
+    target: String,
+}
+
+fn rewrite_mount_spec(spec: &str, ssh_user: &str) -> (String, Option<HomeLink>) {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return (spec.to_string(), None);
+    }
+    let host = parts[0];
+    let guest = parts[1];
+    let mode = parts.get(2).copied();
+
+    let home_prefix = format!("/home/{ssh_user}");
+    let (rel, is_home) = if guest == "~" {
+        (String::new(), true)
+    } else if let Some(stripped) = guest.strip_prefix("~/") {
+        (stripped.to_string(), true)
+    } else if guest == home_prefix {
+        (String::new(), true)
+    } else if let Some(stripped) = guest.strip_prefix(&(home_prefix.clone() + "/")) {
+        (stripped.to_string(), true)
+    } else {
+        (String::new(), false)
+    };
+
+    if !is_home {
+        return (spec.to_string(), None);
+    }
+
+    let root_base = "/usr/local/vibebox-mounts";
+    let root_path = if rel.is_empty() {
+        root_base.to_string()
+    } else {
+        format!("{root_base}/{rel}")
+    };
+    let target = if rel.is_empty() {
+        home_prefix
+    } else {
+        format!("{home_prefix}/{rel}")
+    };
+
+    let rewritten = match mode {
+        Some(mode) => format!("{host}:{root_path}:{mode}"),
+        None => format!("{host}:{root_path}"),
+    };
+
+    (
+        rewritten,
+        Some(HomeLink {
+            source: root_path,
+            target,
+        }),
+    )
+}
+
+fn render_home_links_script(links: &[HomeLink], ssh_user: &str) -> String {
+    if links.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    lines.push("link_home() {".to_string());
+    lines.push("  src=\"$1\"".to_string());
+    lines.push("  dest=\"$2\"".to_string());
+    lines.push("  if [ -L \"$dest\" ]; then".to_string());
+    lines.push("    current=\"$(readlink \"$dest\" || true)\"".to_string());
+    lines.push("    if [ \"$current\" != \"$src\" ]; then".to_string());
+    lines.push("      rm -f \"$dest\"".to_string());
+    lines.push("    fi".to_string());
+    lines.push("  fi".to_string());
+    lines.push("  if [ ! -e \"$dest\" ]; then".to_string());
+    lines.push("    mkdir -p \"$(dirname \"$dest\")\"".to_string());
+    lines.push("    ln -s \"$src\" \"$dest\"".to_string());
+    lines.push("  fi".to_string());
+    lines.push(format!(
+        "  chown -h \"{ssh_user}:{ssh_user}\" \"$dest\" 2>/dev/null || true"
+    ));
+    lines.push("}".to_string());
+    for link in links {
+        let src = shell_escape(&link.source);
+        let dest = shell_escape(&link.target);
+        lines.push(format!("link_home {src} {dest}"));
+    }
+    lines.join("\n")
+}
+
+fn shell_escape(value: &str) -> String {
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 struct PidFileGuard {
@@ -532,6 +639,11 @@ fn run_manager_with(
         write_instance_config(&instance_dir.join(INSTANCE_FILENAME), &config)?;
     }
     let config = Arc::new(Mutex::new(config));
+    let ssh_user = config
+        .lock()
+        .map(|cfg| cfg.ssh_user_display())
+        .unwrap_or_else(|_| DEFAULT_SSH_USER.to_string());
+    let (args, home_links_script) = prepare_mounts_and_links(args, &ssh_user);
 
     let ssh_guest_dir = format!("/root/{}", GLOBAL_DIR_NAME);
     let extra_shares = vec![DirectoryShare::new(
@@ -539,8 +651,13 @@ fn run_manager_with(
         ssh_guest_dir.clone().into(),
         true,
     )?];
-    let extra_login_actions =
-        build_ssh_login_actions(&config, &project_name, ssh_guest_dir.as_str(), "ssh_key");
+    let extra_login_actions = build_ssh_login_actions(
+        &config,
+        &project_name,
+        ssh_guest_dir.as_str(),
+        "ssh_key",
+        &home_links_script,
+    );
 
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
     if let Ok(stream) = UnixStream::connect(&socket_path) {
