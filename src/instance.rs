@@ -162,6 +162,25 @@ pub(crate) fn load_or_create_instance_config(
     Ok(config)
 }
 
+fn read_instance_config(
+    instance_dir: &Path,
+) -> Result<Option<InstanceConfig>, Box<dyn std::error::Error>> {
+    let config_path = instance_dir.join(INSTANCE_FILENAME);
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&config_path)?;
+    let config = toml::from_str::<InstanceConfig>(&raw)?;
+    Ok(Some(config))
+}
+
+pub fn read_instance_vm_ip(
+    instance_dir: &Path,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let config = read_instance_config(instance_dir)?;
+    Ok(config.and_then(|cfg| cfg.vm_ipv4))
+}
+
 pub fn touch_last_active(instance_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = load_or_create_instance_config(instance_dir)?;
     let now = OffsetDateTime::now_utc().format(&Rfc3339)?;

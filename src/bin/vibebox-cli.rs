@@ -168,12 +168,13 @@ fn handle_command(command: Command, cwd: &PathBuf, config_override: Option<&Path
         }
         Command::Explain => {
             let config = config::load_config_with_path(cwd, config_override);
-            let rows = build_mount_rows(cwd, &config)?;
-            if rows.is_empty() {
-                println!("No mounts configured.");
+            let mounts = build_mount_rows(cwd, &config)?;
+            let networks = build_network_rows(cwd)?;
+            if mounts.is_empty() && networks.is_empty() {
+                println!("No mounts or network info available.");
                 return Ok(());
             }
-            tui::render_mounts_table(&rows)?;
+            tui::render_explain_tables(&mounts, &networks)?;
             Ok(())
         }
     }
@@ -250,6 +251,26 @@ fn build_mount_rows(cwd: &Path, config: &config::Config) -> Result<Vec<tui::Moun
         rows.push(parse_mount_spec(cwd, spec, false)?);
     }
     Ok(rows)
+}
+
+fn build_network_rows(cwd: &Path) -> Result<Vec<tui::NetworkListRow>> {
+    let instance_dir = cwd.join(session_manager::INSTANCE_DIR_NAME);
+    let mut vm_ip = "-".to_string();
+    if let Ok(Some(ip)) = instance::read_instance_vm_ip(&instance_dir) {
+        vm_ip = ip;
+    }
+    let host_to_vm = if vm_ip == "-" {
+        "ssh: <pending>:22".to_string()
+    } else {
+        format!("ssh: {vm_ip}:22")
+    };
+    let row = tui::NetworkListRow {
+        network_type: "NAT".to_string(),
+        vm_ip: vm_ip.clone(),
+        host_to_vm,
+        vm_to_host: "none".to_string(),
+    };
+    Ok(vec![row])
 }
 
 fn default_mounts(cwd: &Path) -> Result<Vec<tui::MountListRow>> {

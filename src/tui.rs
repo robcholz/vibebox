@@ -115,6 +115,14 @@ pub struct MountListRow {
     pub default_mount: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct NetworkListRow {
+    pub network_type: String,
+    pub vm_ip: String,
+    pub host_to_vm: String,
+    pub vm_to_host: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PageLayout {
     header: Rect,
@@ -253,6 +261,65 @@ pub fn render_mounts_table(rows: &[MountListRow]) -> Result<()> {
     let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
     let area = Rect::new(0, 0, width, height);
 
+    render_mounts_table_into(rows, area, &mut buffer);
+
+    let mut stdout = io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Show)?;
+    write_buffer_with_style(&buffer, &mut stdout)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+pub fn render_explain_tables(mounts: &[MountListRow], networks: &[NetworkListRow]) -> Result<()> {
+    let (width, _) = crossterm::terminal::size()?;
+    if width == 0 {
+        return Ok(());
+    }
+
+    let mounts_height = if mounts.is_empty() {
+        0
+    } else {
+        (mounts.len() as u16).saturating_add(3)
+    };
+    let networks_height = if networks.is_empty() {
+        0
+    } else {
+        (networks.len() as u16).saturating_add(3)
+    };
+    let gap = if mounts_height > 0 && networks_height > 0 {
+        1
+    } else {
+        0
+    };
+    let total_height = mounts_height
+        .saturating_add(gap)
+        .saturating_add(networks_height);
+    if total_height == 0 {
+        return Ok(());
+    }
+
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width, total_height));
+    let mut y = 0u16;
+
+    if mounts_height > 0 {
+        let area = Rect::new(0, y, width, mounts_height);
+        render_mounts_table_into(mounts, area, &mut buffer);
+        y = y.saturating_add(mounts_height).saturating_add(gap);
+    }
+
+    if networks_height > 0 {
+        let area = Rect::new(0, y, width, networks_height);
+        render_networks_table_into(networks, area, &mut buffer);
+    }
+
+    let mut stdout = io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Show)?;
+    write_buffer_with_style(&buffer, &mut stdout)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn render_mounts_table_into(rows: &[MountListRow], area: Rect, buffer: &mut Buffer) {
     let header = Row::new(vec![
         Cell::from("Host"),
         Cell::from("Guest"),
@@ -286,13 +353,41 @@ pub fn render_mounts_table(rows: &[MountListRow]) -> Result<()> {
     .block(Block::default().title("Mounts").borders(Borders::ALL))
     .column_spacing(1);
 
-    table.render(area, &mut buffer);
+    table.render(area, buffer);
+}
 
-    let mut stdout = io::stdout();
-    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Show)?;
-    write_buffer_with_style(&buffer, &mut stdout)?;
-    stdout.flush()?;
-    Ok(())
+fn render_networks_table_into(rows: &[NetworkListRow], area: Rect, buffer: &mut Buffer) {
+    let header = Row::new(vec![
+        Cell::from("Type"),
+        Cell::from("VM IP"),
+        Cell::from("Host \u{2192} VM"),
+        Cell::from("VM \u{2192} Host"),
+    ])
+    .style(Style::default().fg(Color::Cyan));
+
+    let table_rows = rows.iter().map(|row| {
+        Row::new(vec![
+            Cell::from(row.network_type.clone()),
+            Cell::from(row.vm_ip.clone()),
+            Cell::from(row.host_to_vm.clone()),
+            Cell::from(row.vm_to_host.clone()),
+        ])
+    });
+
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(16),
+            Constraint::Min(24),
+            Constraint::Min(20),
+        ],
+    )
+    .header(header)
+    .block(Block::default().title("Network").borders(Borders::ALL))
+    .column_spacing(1);
+
+    table.render(area, buffer);
 }
 
 pub fn passthrough_vm_io(
