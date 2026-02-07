@@ -1,8 +1,6 @@
 use crate::session_manager::{GLOBAL_CACHE_DIR_NAME, INSTANCE_DIR_NAME};
 use std::{
-    env,
-    ffi::OsString,
-    fs,
+    env, fs,
     io::{self, Write},
     os::{
         fd::RawFd,
@@ -25,7 +23,6 @@ use std::{
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
-use lexopt::prelude::*;
 use objc2::{AnyThread, rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::*;
 use objc2_virtualization::*;
@@ -40,9 +37,12 @@ const DEFAULT_CPU_COUNT: usize = 2;
 const DEFAULT_RAM_MB: u64 = 2048;
 const DEFAULT_RAM_BYTES: u64 = DEFAULT_RAM_MB * BYTES_PER_MB;
 const START_TIMEOUT: Duration = Duration::from_secs(60);
-const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVISION_SCRIPT: &str = include_str!("provision.sh");
+const PROVISION_SCRIPT_NAME: &str = "provision.sh";
+const DEFAULT_RAW_NAME: &str = "default.raw";
+const INSTANCE_RAW_NAME: &str = "instance.raw";
+const BASE_DISK_RAW_NAME: &str = "disk.raw";
 
 #[derive(Clone)]
 pub(crate) enum LoginAction {
@@ -83,7 +83,7 @@ impl DirectoryShare {
         if parts.len() < 2 || parts.len() > 3 {
             return Err(format!("Invalid mount spec: {spec}").into());
         }
-        let host = PathBuf::from(parts[0]);
+        let host = expand_tilde_path(parts[0]);
         let guest = PathBuf::from(parts[1]);
         let read_only = if parts.len() == 3 {
             match parts[2] {
@@ -117,7 +117,27 @@ impl DirectoryShare {
     }
 }
 
-pub fn run_with_args<F>(args: CliArgs, io_handler: F) -> Result<(), Box<dyn std::error::Error>>
+fn expand_tilde_path(value: &str) -> PathBuf {
+    if let Some(stripped) = value.strip_prefix("~/") {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join(stripped);
+        }
+    } else if value == "~" {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(value)
+}
+
+pub struct VmArg {
+    pub cpu_count: usize,
+    pub ram_bytes: u64,
+    pub no_default_mounts: bool,
+    pub mounts: Vec<String>,
+}
+
+pub fn run_with_args<F>(args: VmArg, io_handler: F) -> Result<(), Box<dyn std::error::Error>>
 where
     F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
 {
@@ -125,7 +145,7 @@ where
 }
 
 pub(crate) fn run_with_args_and_extras<F>(
-    args: CliArgs,
+    args: VmArg,
     io_handler: F,
     extra_login_actions: Vec<LoginAction>,
     extra_directory_shares: Vec<DirectoryShare>,
@@ -158,8 +178,8 @@ where
         basename_compressed.trim_end_matches(".tar.xz")
     ));
 
-    let default_raw = cache_dir.join("default.raw");
-    let instance_raw = instance_dir.join("instance.raw");
+    let default_raw = cache_dir.join(DEFAULT_RAW_NAME);
+    let instance_raw = instance_dir.join(INSTANCE_RAW_NAME);
 
     // Prepare system-wide directories
     fs::create_dir_all(&cache_dir)?;
@@ -168,22 +188,14 @@ where
     let mise_directory_share =
         DirectoryShare::new(guest_mise_cache, "/root/.local/share/mise".into(), false)?;
 
-    let disk_path = if let Some(path) = args.disk {
-        if !path.exists() {
-            return Err(format!("Disk image does not exist: {}", path.display()).into());
-        }
-        path
-    } else {
-        ensure_default_image(
-            &base_raw,
-            &base_compressed,
-            &default_raw,
-            std::slice::from_ref(&mise_directory_share),
-        )?;
-        ensure_instance_disk(&instance_raw, &default_raw)?;
-
-        instance_raw
-    };
+    ensure_default_image(
+        &base_raw,
+        &base_compressed,
+        &default_raw,
+        std::slice::from_ref(&mise_directory_share),
+    )?;
+    ensure_instance_disk(&instance_raw, &default_raw)?;
+    let disk_path = instance_raw;
 
     let mut login_actions = Vec::new();
     let mut directory_shares = Vec::new();
@@ -207,22 +219,6 @@ where
         );
 
         directory_shares.push(mise_directory_share);
-
-        // Add default shares, if they exist
-        for share in [
-            DirectoryShare::new(home.join(".codex"), "/usr/local/codex".into(), false),
-            DirectoryShare::new(home.join(".claude"), "/usr/local/claude".into(), false),
-            DirectoryShare::new(
-                "/Users/zhangjie/Documents/Code/CompletePrograms/vibebox/.ssh".into(),
-                "/usr/local/ssh".into(),
-                true,
-            ),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            directory_shares.push(share)
-        }
     }
 
     directory_shares.extend(extra_directory_shares);
@@ -237,9 +233,6 @@ where
 
     login_actions.extend(extra_login_actions);
 
-    // Any user-provided login actions must come after our system ones
-    login_actions.extend(args.login_actions);
-
     run_vm_with_io(
         &disk_path,
         &login_actions,
@@ -248,156 +241,6 @@ where
         args.ram_bytes,
         io_handler,
     )
-}
-
-pub fn print_help() {
-    println!(
-        "Vibe is a quick way to spin up a Linux virtual machine on Mac to sandbox LLM agents.
-
-vibe [OPTIONS] [disk-image.raw]
-
-Options
-
-  --help                                                    Print this help message.
-  --version                                                 Print the version (commit SHA).
-  --no-default-mounts                                       Disable all default mounts.
-  --mount host-path:guest-path[:read-only | :read-write]    Mount `host-path` inside VM at `guest-path`.
-                                                            Defaults to read-write.
-                                                            Errors if host-path does not exist.
-  --cpus <count>                                            Number of virtual CPUs (default {DEFAULT_CPU_COUNT}).
-  --ram <megabytes>                                         RAM size in megabytes (default {DEFAULT_RAM_MB}).
-  --script <path/to/script.sh>                              Run script in VM.
-  --send <some-command>                                     Type `some-command` followed by newline into the VM.
-  --expect <string> [timeout-seconds]                       Wait for `string` to appear in console output before executing next `--script` or `--send`.
-                                                            If `string` does not appear within timeout (default 30 seconds), shutdown VM with error.
-"
-    );
-}
-
-pub fn print_version() {
-    println!("Vibe");
-    println!("https://github.com/lynaghk/vibe/");
-    println!("Git SHA: {}", env!("GIT_SHA"));
-}
-
-pub struct CliArgs {
-    disk: Option<PathBuf>,
-    version: bool,
-    help: bool,
-    no_default_mounts: bool,
-    mounts: Vec<String>,
-    login_actions: Vec<LoginAction>,
-    cpu_count: usize,
-    ram_bytes: u64,
-}
-
-impl CliArgs {
-    pub fn version(&self) -> bool {
-        self.version
-    }
-
-    pub fn help(&self) -> bool {
-        self.help
-    }
-
-    pub fn cpu_count(&self) -> usize {
-        self.cpu_count
-    }
-
-    pub fn ram_bytes(&self) -> u64 {
-        self.ram_bytes
-    }
-
-    pub fn ram_mb(&self) -> u64 {
-        self.ram_bytes / BYTES_PER_MB
-    }
-}
-
-pub fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
-    parse_cli_from(env::args_os())
-}
-
-pub fn parse_cli_from<I>(args: I) -> Result<CliArgs, Box<dyn std::error::Error>>
-where
-    I: IntoIterator<Item = OsString>,
-{
-    fn os_to_string(value: OsString, flag: &str) -> Result<String, Box<dyn std::error::Error>> {
-        value
-            .into_string()
-            .map_err(|_| format!("{flag} expects valid UTF-8").into())
-    }
-
-    let mut parser = lexopt::Parser::from_iter(args);
-    let mut disk = None;
-    let mut version = false;
-    let mut help = false;
-    let mut no_default_mounts = false;
-    let mut mounts = Vec::new();
-    let mut login_actions = Vec::new();
-    let mut script_index = 0;
-    let mut cpu_count = DEFAULT_CPU_COUNT;
-    let mut ram_bytes = DEFAULT_RAM_BYTES;
-
-    while let Some(arg) = parser.next()? {
-        match arg {
-            Long("version") => version = true,
-            Long("help") | Short('h') => help = true,
-            Long("no-default-mounts") => no_default_mounts = true,
-            Long("cpus") => {
-                let value = os_to_string(parser.value()?, "--cpus")?.parse()?;
-                if value == 0 {
-                    return Err("--cpus must be >= 1".into());
-                }
-                cpu_count = value;
-            }
-            Long("ram") => {
-                let value: u64 = os_to_string(parser.value()?, "--ram")?.parse()?;
-                if value == 0 {
-                    return Err("--ram must be >= 1".into());
-                }
-                ram_bytes = value * BYTES_PER_MB;
-            }
-            Long("mount") => {
-                mounts.push(os_to_string(parser.value()?, "--mount")?);
-            }
-            Long("script") => {
-                login_actions.push(Script {
-                    path: os_to_string(parser.value()?, "--script")?.into(),
-                    index: script_index,
-                });
-                script_index += 1;
-            }
-            Long("send") => {
-                login_actions.push(Send(os_to_string(parser.value()?, "--send")?));
-            }
-            Long("expect") => {
-                let text = os_to_string(parser.value()?, "--expect")?;
-                let timeout = match parser.optional_value() {
-                    Some(value) => Duration::from_secs(os_to_string(value, "--expect")?.parse()?),
-                    None => DEFAULT_EXPECT_TIMEOUT,
-                };
-                login_actions.push(Expect { text, timeout });
-            }
-            Value(value) => {
-                if disk.is_some() {
-                    return Err("Only one disk path may be provided".into());
-                }
-                disk = Some(PathBuf::from(value));
-            }
-            _ => return Err(arg.unexpected().into()),
-        }
-    }
-
-    Ok(CliArgs {
-        disk,
-        version,
-        help,
-        no_default_mounts,
-        mounts,
-        login_actions,
-        cpu_count,
-        ram_bytes,
-    })
 }
 
 fn script_command_from_path(
@@ -629,7 +472,11 @@ fn ensure_base_image(
 
     println!("Decompressing base image...");
     let status = Command::new("tar")
-        .args(["-xOf", &base_compressed.to_string_lossy(), "disk.raw"])
+        .args([
+            "-xOf",
+            &base_compressed.to_string_lossy(),
+            BASE_DISK_RAW_NAME,
+        ])
         .stdout(std::fs::File::create(base_raw)?)
         .status()?;
 
@@ -655,7 +502,7 @@ fn ensure_default_image(
     println!("Configuring base image...");
     fs::copy(base_raw, default_raw)?;
 
-    let provision_command = script_command_from_content("provision.sh", PROVISION_SCRIPT)?;
+    let provision_command = script_command_from_content(PROVISION_SCRIPT_NAME, PROVISION_SCRIPT)?;
     run_vm(
         default_raw,
         &[Send(provision_command)],

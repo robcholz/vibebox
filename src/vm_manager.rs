@@ -15,24 +15,30 @@ use std::{
 };
 
 use crate::{
+    config::CONFIG_PATH_ENV,
+    instance::SERIAL_LOG_NAME,
     instance::{
         InstanceConfig, build_ssh_login_actions, ensure_instance_dir, ensure_ssh_keypair,
         extract_ipv4, load_or_create_instance_config, write_instance_config,
     },
-    session_manager::GLOBAL_DIR_NAME,
+    session_manager::{
+        GLOBAL_DIR_NAME, INSTANCE_FILENAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME,
+    },
     vm::{self, DirectoryShare, LoginAction, VmInput},
 };
 
-const VM_MANAGER_SOCKET_NAME: &str = "vm.sock";
 const VM_MANAGER_LOCK_NAME: &str = "vm.lock";
+const VM_MANAGER_LOG_NAME: &str = "vm_manager.log";
 
 pub fn ensure_manager(
     raw_args: &[std::ffi::OsString],
     auto_shutdown_ms: u64,
+    config_path: Option<&Path>,
 ) -> Result<UnixStream, Box<dyn std::error::Error>> {
     let project_root = env::current_dir()?;
     tracing::debug!(root = %project_root.display(), "ensure vm manager");
     let instance_dir = ensure_instance_dir(&project_root)?;
+    cleanup_stale_manager(&instance_dir);
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
 
     if let Ok(stream) = UnixStream::connect(&socket_path) {
@@ -45,7 +51,7 @@ pub fn ensure_manager(
     let mut lock_file = acquire_spawn_lock(&lock_path)?;
     if lock_file.is_some() {
         tracing::info!(path = %socket_path.display(), "spawning vm manager");
-        spawn_manager_process(raw_args, auto_shutdown_ms, &instance_dir)?;
+        spawn_manager_process(raw_args, auto_shutdown_ms, &instance_dir, config_path)?;
     } else {
         tracing::info!(
             path = %socket_path.display(),
@@ -89,11 +95,12 @@ pub fn ensure_manager(
 }
 
 pub fn run_manager(
-    args: vm::CliArgs,
+    args: vm::VmArg,
     auto_shutdown_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let project_root = env::current_dir()?;
     tracing::info!(root = %project_root.display(), "vm manager starting");
+    let _pid_guard = ensure_pid_file(&project_root)?;
     run_manager_with(
         &project_root,
         args,
@@ -111,6 +118,7 @@ fn spawn_manager_process(
     raw_args: &[std::ffi::OsString],
     auto_shutdown_ms: u64,
     instance_dir: &Path,
+    config_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let exe = env::current_exe()?;
     let mut supervisor_exe = exe.clone();
@@ -131,8 +139,11 @@ fn spawn_manager_process(
     }
     cmd.env("VIBEBOX_LOG_NO_COLOR", "1");
     cmd.env("VIBEBOX_AUTO_SHUTDOWN_MS", auto_shutdown_ms.to_string());
+    if let Some(path) = config_path {
+        cmd.env(CONFIG_PATH_ENV, path);
+    }
     tracing::info!(auto_shutdown_ms, "vm manager process spawn requested");
-    let log_path = instance_dir.join("vm_manager.log");
+    let log_path = instance_dir.join(VM_MANAGER_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -151,6 +162,44 @@ fn spawn_manager_process(
     }
     let _child = cmd.spawn()?;
     Ok(())
+}
+
+fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard, Box<dyn std::error::Error>> {
+    let instance_dir = ensure_instance_dir(project_root)?;
+    let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
+    if let Ok(content) = fs::read_to_string(&pid_path) {
+        if let Ok(pid) = content.trim().parse::<u32>() {
+            if pid_is_alive(pid) {
+                return Err(format!("vm manager already running (pid {pid})").into());
+            }
+        }
+        let _ = fs::remove_file(&pid_path);
+    }
+    fs::write(&pid_path, format!("{}\n", std::process::id()))?;
+    let _ = fs::set_permissions(&pid_path, fs::Permissions::from_mode(0o600));
+    Ok(PidFileGuard { path: pid_path })
+}
+
+fn cleanup_stale_manager(instance_dir: &Path) {
+    let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
+    if let Ok(content) = fs::read_to_string(&pid_path) {
+        if let Ok(pid) = content.trim().parse::<u32>() {
+            if pid_is_alive(pid) {
+                return;
+            }
+        }
+    }
+    let _ = fs::remove_file(&pid_path);
+}
+
+struct PidFileGuard {
+    path: PathBuf,
+}
+
+impl Drop for PidFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn detach_from_terminal() {
@@ -280,7 +329,7 @@ fn spawn_manager_io(
     vm_output_fd: std::os::unix::io::OwnedFd,
     vm_input_fd: std::os::unix::io::OwnedFd,
 ) -> vm::IoContext {
-    let log_path = instance_dir.join("serial.log");
+    let log_path = instance_dir.join(SERIAL_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -289,7 +338,7 @@ fn spawn_manager_io(
         .ok()
         .map(|file| Arc::new(Mutex::new(file)));
 
-    let instance_path = instance_dir.join("instance.toml");
+    let instance_path = instance_dir.join(INSTANCE_FILENAME);
     let config_for_output = config.clone();
     let log_for_output = log_file.clone();
     let mut line_buf = String::new();
@@ -390,7 +439,7 @@ struct ManagerOptions {
 trait VmExecutor {
     fn run_vm(
         &self,
-        args: vm::CliArgs,
+        args: vm::VmArg,
         extra_login_actions: Vec<LoginAction>,
         extra_shares: Vec<DirectoryShare>,
         config: Arc<Mutex<InstanceConfig>>,
@@ -404,7 +453,7 @@ struct RealVmExecutor;
 impl VmExecutor for RealVmExecutor {
     fn run_vm(
         &self,
-        args: vm::CliArgs,
+        args: vm::VmArg,
         extra_login_actions: Vec<LoginAction>,
         extra_shares: Vec<DirectoryShare>,
         config: Arc<Mutex<InstanceConfig>>,
@@ -433,7 +482,7 @@ impl VmExecutor for RealVmExecutor {
 
 fn run_manager_with(
     project_root: &Path,
-    args: vm::CliArgs,
+    args: vm::VmArg,
     auto_shutdown_ms: u64,
     executor: &dyn VmExecutor,
     options: ManagerOptions,
@@ -465,7 +514,7 @@ fn run_manager_with(
     let mut config = load_or_create_instance_config(&instance_dir)?;
     if config.vm_ipv4.is_some() {
         config.vm_ipv4 = None;
-        write_instance_config(&instance_dir.join("instance.toml"), &config)?;
+        write_instance_config(&instance_dir.join(INSTANCE_FILENAME), &config)?;
     }
     let config = Arc::new(Mutex::new(config));
 

@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     io::{self, Write},
+    os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
 };
 
@@ -11,9 +12,10 @@ use crate::config::CONFIG_FILENAME;
 pub const INSTANCE_DIR_NAME: &str = ".vibebox";
 pub const GLOBAL_CACHE_DIR_NAME: &str = "vibebox";
 pub const GLOBAL_DIR_NAME: &str = ".vibebox";
-pub const INSTANCE_TOML_FILENAME: &str = "instance.toml";
-pub const SESSION_TEMP_PREFIX: &str = "sessions";
+pub const INSTANCE_FILENAME: &str = "instance.toml";
 pub const SESSION_TOML_SUFFIX: &str = ".toml";
+pub const VM_MANAGER_SOCKET_NAME: &str = "vm.sock";
+pub const VM_MANAGER_PID_NAME: &str = "vm.pid";
 const SESSIONS_DIR_NAME: &str = "sessions";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +23,7 @@ pub struct SessionRecord {
     pub directory: PathBuf,
     pub id: String,
     pub last_active: Option<String>,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +43,13 @@ struct InstanceMetadata {
 #[derive(Debug)]
 pub struct SessionManager {
     sessions_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanSummary {
+    pub instance_dir: PathBuf,
+    pub removed_instance_dir: bool,
+    pub removed_sessions: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -100,7 +110,8 @@ impl SessionManager {
             } else {
                 tracing::warn!(
                     directory = %directory.display(),
-                    "missing session id in instance.toml"
+                    file = INSTANCE_FILENAME,
+                    "missing session id in instance file"
                 );
             }
         }
@@ -138,13 +149,31 @@ impl SessionManager {
         let mut records = Vec::with_capacity(sessions.len());
         for session in sessions {
             let meta = read_instance_metadata(&session.directory)?;
+            let active = is_session_active(&session.directory);
             records.push(SessionRecord {
                 directory: session.directory,
                 id: session.id,
                 last_active: meta.last_active,
+                active,
             });
         }
         Ok(records)
+    }
+
+    pub fn clean_project(&self, directory: &Path) -> Result<CleanSummary, SessionError> {
+        let directory = self.normalize_directory(directory)?;
+        let instance_dir = directory.join(INSTANCE_DIR_NAME);
+        let mut removed_instance_dir = false;
+        if instance_dir.exists() {
+            fs::remove_dir_all(&instance_dir)?;
+            removed_instance_dir = true;
+        }
+        let removed_sessions = self.remove_session_records_for_directory(&directory)?;
+        Ok(CleanSummary {
+            instance_dir,
+            removed_instance_dir,
+            removed_sessions,
+        })
     }
 
     fn normalize_directory(&self, directory: &Path) -> Result<PathBuf, SessionError> {
@@ -158,7 +187,7 @@ impl SessionManager {
     }
 
     fn session_path_for(&self, id: &str) -> PathBuf {
-        let filename = format!("{id}.toml");
+        let filename = format!("{id}{SESSION_TOML_SUFFIX}");
         self.sessions_dir.join(filename)
     }
 
@@ -206,6 +235,36 @@ impl SessionManager {
 
         Ok((sessions, removed))
     }
+
+    fn remove_session_records_for_directory(
+        &self,
+        directory: &Path,
+    ) -> Result<usize, SessionError> {
+        if !self.sessions_dir.exists() {
+            return Ok(0);
+        }
+        let mut removed = 0usize;
+        for entry in fs::read_dir(&self.sessions_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let record = read_session_file(&path)?;
+            if record.directory == directory {
+                fs::remove_file(&path)?;
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            tracing::info!(
+                directory = %directory.display(),
+                removed,
+                "removed session records"
+            );
+        }
+        Ok(removed)
+    }
 }
 
 fn is_vibebox_dir(directory: &Path) -> bool {
@@ -213,6 +272,43 @@ fn is_vibebox_dir(directory: &Path) -> bool {
         return false;
     }
     directory.join(CONFIG_FILENAME).is_file()
+}
+
+fn is_session_active(directory: &Path) -> bool {
+    let instance_dir = directory.join(INSTANCE_DIR_NAME);
+    let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
+    let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
+
+    let pid = read_pid(&pid_path);
+    let is_alive = pid.map(pid_is_alive).unwrap_or(false);
+    if !is_alive {
+        let _ = fs::remove_file(&pid_path);
+        return false;
+    }
+
+    if let Ok(metadata) = fs::metadata(&socket_path) {
+        return metadata.file_type().is_socket();
+    }
+
+    true
+}
+
+fn read_pid(path: &Path) -> Option<u32> {
+    let content = fs::read_to_string(path).ok()?;
+    content.trim().parse::<u32>().ok()
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    let pid = pid as libc::pid_t;
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return true;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(code) if code == libc::EPERM => true,
+        Some(code) if code == libc::ESRCH => false,
+        _ => false,
+    }
 }
 
 fn read_session_file(path: &Path) -> Result<SessionEntry, SessionError> {
@@ -225,9 +321,7 @@ fn read_session_file(path: &Path) -> Result<SessionEntry, SessionError> {
 }
 
 fn read_instance_metadata(directory: &Path) -> Result<InstanceMetadata, SessionError> {
-    let instance_path = directory
-        .join(INSTANCE_DIR_NAME)
-        .join(INSTANCE_TOML_FILENAME);
+    let instance_path = directory.join(INSTANCE_DIR_NAME).join(INSTANCE_FILENAME);
     if !instance_path.exists() {
         return Ok(InstanceMetadata::default());
     }
@@ -256,7 +350,7 @@ fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 
     fs::create_dir_all(parent)?;
     let mut temp = tempfile::Builder::new()
-        .prefix(SESSION_TEMP_PREFIX)
+        .prefix(SESSIONS_DIR_NAME)
         .suffix(SESSION_TOML_SUFFIX)
         .tempfile_in(parent)?;
     temp.write_all(content)?;
@@ -285,7 +379,7 @@ mod tests {
         let instance_dir = project_dir.join(INSTANCE_DIR_NAME);
         fs::create_dir_all(&instance_dir).unwrap();
         let content = format!("id = \"{id}\"\nlast_active = \"{last_active}\"\n");
-        fs::write(instance_dir.join(INSTANCE_TOML_FILENAME), content).unwrap();
+        fs::write(instance_dir.join(INSTANCE_FILENAME), content).unwrap();
     }
 
     #[test]
@@ -306,9 +400,10 @@ mod tests {
         assert_eq!(dirs[0], project_dir.canonicalize().unwrap());
         assert!(mgr.index_path().exists());
 
-        let session_path = mgr
-            .index_path()
-            .join("019bf290-cccc-7c23-ba1d-dce7e6d40693.toml");
+        let session_path = mgr.index_path().join(format!(
+            "019bf290-cccc-7c23-ba1d-dce7e6d40693{}",
+            SESSION_TOML_SUFFIX
+        ));
         assert!(session_path.exists());
     }
 
@@ -329,9 +424,10 @@ mod tests {
         let sessions = mgr.list_sessions().unwrap();
         assert!(sessions.is_empty());
 
-        let session_path = mgr
-            .index_path()
-            .join("019bf290-cccc-7c23-ba1d-dce7e6d40693.toml");
+        let session_path = mgr.index_path().join(format!(
+            "019bf290-cccc-7c23-ba1d-dce7e6d40693{}",
+            SESSION_TOML_SUFFIX
+        ));
         assert!(!session_path.exists());
     }
 
@@ -340,7 +436,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         fs::create_dir_all(mgr.index_path()).unwrap();
-        fs::write(mgr.index_path().join("bad.toml"), "not toml").unwrap();
+        fs::write(
+            mgr.index_path().join(format!("bad{SESSION_TOML_SUFFIX}")),
+            "not toml",
+        )
+        .unwrap();
 
         let err = mgr.list_sessions().unwrap_err();
         assert!(matches!(err, SessionError::TomlDe(_)));
