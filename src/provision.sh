@@ -15,16 +15,10 @@ apt-get install -y --no-install-recommends      \
         git                                     \
         ripgrep                                 \
         openssh-server                          \
-        locales                                 \
         sudo
 
-# Set hostname to "vibe" so it's clear that you're inside the VM.
-hostnamectl set-hostname vibe
-
-# Locale (fix: setlocale: LC_CTYPE ... UTF-8)
-sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
-locale-gen
-update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+# Set hostname to "vibebox" so it's clear that you're inside the VM.
+hostnamectl set-hostname vibebox
 
 # SSH: host keys + base config (doesn't depend on runtime user)
 ssh-keygen -A
@@ -53,11 +47,6 @@ cat > .bash_logout <<EOF
 systemctl poweroff
 sleep 100 # sleep here so that we don't see the login screen flash up before the shutdown.
 EOF
-
-
-# Install Rust
-curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --component "rustfmt,clippy"
-
 
 # Install Mise
 curl https://mise.run | sh

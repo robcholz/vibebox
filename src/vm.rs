@@ -795,12 +795,7 @@ where
                     continue;
                 }
 
-                match poll_with_wakeup(
-                    libc::STDIN_FILENO,
-                    wakeup_read.as_raw_fd(),
-                    &mut buf,
-                    -1,
-                ) {
+                match poll_with_wakeup(libc::STDIN_FILENO, wakeup_read.as_raw_fd(), &mut buf, -1) {
                     PollResult::Shutdown | PollResult::Error => break,
                     PollResult::Spurious => continue,
                     PollResult::Ready(bytes) => {
@@ -858,8 +853,7 @@ where
                     wakeup_read.as_raw_fd(),
                     &mut buf,
                     100,
-                )
-                {
+                ) {
                     PollResult::Shutdown | PollResult::Error => break,
                     PollResult::Spurious => continue,
                     PollResult::Ready(bytes) => {

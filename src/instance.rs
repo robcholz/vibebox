@@ -1,12 +1,8 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{self, Write},
     net::{SocketAddr, TcpStream},
-    os::unix::{
-        fs::PermissionsExt,
-        io::OwnedFd,
-    },
+    os::unix::{fs::PermissionsExt, io::OwnedFd},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -17,8 +13,8 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use std::sync::mpsc::Sender;
+use uuid::Uuid;
 
 use crate::{
     session_manager::INSTANCE_DIR_NAME,
@@ -30,7 +26,7 @@ const INSTANCE_TOML: &str = "instance.toml";
 const SSH_KEY_NAME: &str = "ssh_key";
 const SERIAL_LOG_NAME: &str = "serial.log";
 const SSH_GUEST_DIR: &str = "/root/.vibebox";
-const DEFAULT_SSH_USER: &str = "vibebox";
+const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
 const SSH_SETUP_SCRIPT: &str = include_str!("ssh.sh");
@@ -76,12 +72,8 @@ pub fn run_with_ssh(
         true,
     )?];
 
-    let extra_login_actions = build_ssh_login_actions(
-        &config,
-        &project_name,
-        SSH_GUEST_DIR,
-        SSH_KEY_NAME,
-    );
+    let extra_login_actions =
+        build_ssh_login_actions(&config, &project_name, SSH_GUEST_DIR, SSH_KEY_NAME);
 
     vm::run_with_args_and_extras(
         args,
@@ -107,7 +99,9 @@ fn ensure_instance_dir(project_root: &Path) -> Result<PathBuf, io::Error> {
     Ok(instance_dir)
 }
 
-fn ensure_ssh_keypair(instance_dir: &Path) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+fn ensure_ssh_keypair(
+    instance_dir: &Path,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
     let private_key = instance_dir.join(SSH_KEY_NAME);
     let public_key = instance_dir.join(format!("{SSH_KEY_NAME}.pub"));
 
@@ -129,12 +123,13 @@ fn ensure_ssh_keypair(instance_dir: &Path) -> Result<(PathBuf, PathBuf), Box<dyn
             "-N",
             "",
             "-f",
-            private_key
-                .to_str()
-                .ok_or("ssh key path not utf-8")?,
+            private_key.to_str().ok_or("ssh key path not utf-8")?,
             "-C",
             "vibebox",
         ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
         .status()?;
 
     if !status.success() {
@@ -283,8 +278,7 @@ fn spawn_ssh_io(
     let ssh_connected = Arc::new(AtomicBool::new(false));
     let ssh_started = Arc::new(AtomicBool::new(false));
     let ssh_ready = Arc::new(AtomicBool::new(false));
-    let input_tx_holder: Arc<Mutex<Option<Sender<VmInput>>>> =
-        Arc::new(Mutex::new(None));
+    let input_tx_holder: Arc<Mutex<Option<Sender<VmInput>>>> = Arc::new(Mutex::new(None));
 
     let instance_path = instance_dir.join(INSTANCE_TOML);
     let config_for_output = config.clone();
@@ -415,9 +409,7 @@ fn spawn_ssh_io(
                             );
                             break;
                         }
-                        thread::sleep(std::time::Duration::from_millis(
-                            SSH_CONNECT_DELAY_MS,
-                        ));
+                        thread::sleep(std::time::Duration::from_millis(SSH_CONNECT_DELAY_MS));
                         continue;
                     }
 
@@ -427,9 +419,7 @@ fn spawn_ssh_io(
                     let status = Command::new("ssh")
                         .args([
                             "-i",
-                            ssh_key_for_thread
-                                .to_str()
-                                .unwrap_or(".vibebox/ssh_key"),
+                            ssh_key_for_thread.to_str().unwrap_or(".vibebox/ssh_key"),
                             "-o",
                             "IdentitiesOnly=yes",
                             "-o",
@@ -447,6 +437,9 @@ fn spawn_ssh_io(
                             "-o",
                             "ConnectTimeout=5",
                         ])
+                        .env_remove("LC_CTYPE")
+                        .env_remove("LC_ALL")
+                        //  .env_remove("LANG")
                         .arg(format!("{ssh_user}@{ip}"))
                         .stdin(Stdio::inherit())
                         .stdout(Stdio::inherit())
@@ -458,8 +451,7 @@ fn spawn_ssh_io(
                             ssh_connected_for_thread.store(false, Ordering::SeqCst);
                             eprintln!("[vibebox] ssh exited with status: {status}");
                             if let Some(tx) = input_tx_holder_for_thread.lock().unwrap().clone() {
-                                let _ =
-                                    tx.send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()));
+                                let _ = tx.send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()));
                             }
                             break;
                         }
@@ -479,8 +471,7 @@ fn spawn_ssh_io(
                             ssh_connected_for_thread.store(false, Ordering::SeqCst);
                             eprintln!("[vibebox] ssh exited with status: {status}");
                             if let Some(tx) = input_tx_holder_for_thread.lock().unwrap().clone() {
-                                let _ =
-                                    tx.send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()));
+                                let _ = tx.send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()));
                             }
                             break;
                         }

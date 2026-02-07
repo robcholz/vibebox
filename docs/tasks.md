@@ -36,6 +36,6 @@
 ## Integration
 
 1. [x] Wire up the vm and tui.
-2. [ ] Use ssh to connect to vm.
+2. [x] Use ssh to connect to vm.
 3. [ ] wire up SessionManager.
-4. [ ] VM should be separated by per-session VM daemon process (only accepts if to shutdown vm and itself).
+4. [ ] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
