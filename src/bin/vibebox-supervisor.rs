@@ -6,7 +6,7 @@ use std::{
 use color_eyre::Result;
 use tracing_subscriber::EnvFilter;
 
-use vibebox::{vm, vm_manager};
+use vibebox::{instance, vm, vm_manager};
 
 const DEFAULT_AUTO_SHUTDOWN_MS: u64 = 3000;
 
@@ -15,6 +15,10 @@ fn main() -> Result<()> {
     color_eyre::install()?;
 
     tracing::info!("starting vm supervisor");
+    let cwd = env::current_dir().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    let instance_dir = instance::ensure_instance_dir(&cwd)
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    let _ = instance::touch_last_active(&instance_dir);
     let args = vm::parse_cli().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
     let auto_shutdown_ms = env::var("VIBEBOX_AUTO_SHUTDOWN_MS")
         .ok()
@@ -22,7 +26,9 @@ fn main() -> Result<()> {
         .unwrap_or(DEFAULT_AUTO_SHUTDOWN_MS);
     tracing::info!(auto_shutdown_ms, "vm supervisor config");
 
-    if let Err(err) = vm_manager::run_manager(args, auto_shutdown_ms) {
+    let result = vm_manager::run_manager(args, auto_shutdown_ms);
+    let _ = instance::touch_last_active(&instance_dir);
+    if let Err(err) = result {
         tracing::error!(error = %err, "vm supervisor exited");
         return Err(color_eyre::eyre::eyre!(err.to_string()));
     }

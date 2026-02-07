@@ -1,25 +1,17 @@
 use std::{
     env,
     ffi::OsString,
-    fs,
     io::{self, IsTerminal, Write},
-    path::Path,
     sync::{Arc, Mutex},
 };
 
 use color_eyre::Result;
-use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
 use vibebox::tui::{AppState, VmInfo};
-use vibebox::{instance, tui, vm, vm_manager};
+use vibebox::{SessionManager, config, instance, tui, vm, vm_manager};
 
 const DEFAULT_AUTO_SHUTDOWN_MS: u64 = 3000;
-
-#[derive(Debug, Default, Deserialize)]
-struct ProjectConfig {
-    auto_shutdown_ms: Option<u64>,
-}
 
 fn main() -> Result<()> {
     init_tracing();
@@ -62,6 +54,13 @@ fn main() -> Result<()> {
     };
     let cwd = env::current_dir().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
     tracing::info!(cwd = %cwd.display(), "starting vibebox cli");
+    if let Ok(manager) = SessionManager::new() {
+        if let Err(err) = manager.update_global_sessions(&cwd) {
+            tracing::warn!(error = %err, "failed to update global session list");
+        }
+    } else {
+        tracing::warn!("failed to initialize session manager");
+    }
     let app = Arc::new(Mutex::new(AppState::new(cwd.clone(), vm_info)));
 
     {
@@ -74,7 +73,10 @@ fn main() -> Result<()> {
         stdout.flush()?;
     }
 
-    let auto_shutdown_ms = load_auto_shutdown_ms(&cwd)?;
+    let auto_shutdown_ms = config::load_config(&cwd)
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?
+        .auto_shutdown_ms
+        .unwrap_or(DEFAULT_AUTO_SHUTDOWN_MS);
     tracing::info!(auto_shutdown_ms, "auto shutdown config");
     let manager_conn = vm_manager::ensure_manager(&raw_args, auto_shutdown_ms)
         .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
@@ -82,16 +84,6 @@ fn main() -> Result<()> {
     instance::run_with_ssh(manager_conn).map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
 
     Ok(())
-}
-
-fn load_auto_shutdown_ms(project_root: &Path) -> Result<u64> {
-    let path = project_root.join("vibebox.toml");
-    let config = match fs::read_to_string(&path) {
-        Ok(raw) => toml::from_str::<ProjectConfig>(&raw)?,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => ProjectConfig::default(),
-        Err(err) => return Err(err.into()),
-    };
-    Ok(config.auto_shutdown_ms.unwrap_or(DEFAULT_AUTO_SHUTDOWN_MS))
 }
 
 fn init_tracing() {

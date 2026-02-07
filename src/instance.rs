@@ -1,3 +1,4 @@
+use crate::session_manager::INSTANCE_TOML_FILENAME;
 use std::{
     env, fs,
     io::{self, Write},
@@ -15,6 +16,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc::Sender;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
@@ -23,7 +25,6 @@ use crate::{
     vm::{self, LoginAction, VmInput},
 };
 
-const INSTANCE_TOML: &str = "instance.toml";
 const SSH_KEY_NAME: &str = "ssh_key";
 #[allow(dead_code)]
 const SERIAL_LOG_NAME: &str = "serial.log";
@@ -34,10 +35,14 @@ const SSH_SETUP_SCRIPT: &str = include_str!("ssh.sh");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct InstanceConfig {
+    #[serde(default)]
+    id: String,
     #[serde(default = "default_ssh_user")]
     ssh_user: String,
     #[serde(default)]
     sudo_password: String,
+    #[serde(default)]
+    last_active: Option<String>,
     #[serde(default)]
     pub(crate) vm_ipv4: Option<String>,
 }
@@ -69,7 +74,7 @@ pub fn run_with_ssh(manager_conn: UnixStream) -> Result<(), Box<dyn std::error::
     run_ssh_session(ssh_key, ssh_user, ip)
 }
 
-pub(crate) fn ensure_instance_dir(project_root: &Path) -> Result<PathBuf, io::Error> {
+pub fn ensure_instance_dir(project_root: &Path) -> Result<PathBuf, io::Error> {
     let instance_dir = project_root.join(INSTANCE_DIR_NAME);
     fs::create_dir_all(&instance_dir)?;
     Ok(instance_dir)
@@ -121,14 +126,16 @@ pub(crate) fn ensure_ssh_keypair(
 pub(crate) fn load_or_create_instance_config(
     instance_dir: &Path,
 ) -> Result<InstanceConfig, Box<dyn std::error::Error>> {
-    let config_path = instance_dir.join(INSTANCE_TOML);
+    let config_path = instance_dir.join(INSTANCE_TOML_FILENAME);
     let mut config = if config_path.exists() {
         let raw = fs::read_to_string(&config_path)?;
         toml::from_str::<InstanceConfig>(&raw)?
     } else {
         InstanceConfig {
+            id: String::new(),
             ssh_user: default_ssh_user(),
             sudo_password: String::new(),
+            last_active: None,
             vm_ipv4: None,
         }
     };
@@ -136,6 +143,11 @@ pub(crate) fn load_or_create_instance_config(
     let mut changed = false;
     if config.ssh_user.trim().is_empty() {
         config.ssh_user = default_ssh_user();
+        changed = true;
+    }
+
+    if config.id.trim().is_empty() {
+        config.id = Uuid::now_v7().to_string();
         changed = true;
     }
 
@@ -149,6 +161,14 @@ pub(crate) fn load_or_create_instance_config(
     }
 
     Ok(config)
+}
+
+pub fn touch_last_active(instance_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = load_or_create_instance_config(instance_dir)?;
+    let now = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    config.last_active = Some(now);
+    write_instance_config(&instance_dir.join(INSTANCE_TOML_FILENAME), &config)?;
+    Ok(())
 }
 
 pub(crate) fn write_instance_config(
@@ -357,7 +377,7 @@ fn spawn_ssh_io(
     let ssh_ready = Arc::new(AtomicBool::new(false));
     let input_tx_holder: Arc<Mutex<Option<Sender<VmInput>>>> = Arc::new(Mutex::new(None));
 
-    let instance_path = instance_dir.join(INSTANCE_TOML);
+    let instance_path = instance_dir.join(INSTANCE_TOML_FILENAME);
     let config_for_output = config.clone();
     let log_for_output = log_file.clone();
     let ssh_connected_for_output = ssh_connected.clone();

@@ -40,7 +40,7 @@
 3. [x] allow multi vibebox to connect to the same vm.
 4. [x] use vm.lock to ensure process concurrency safety.
 5. [ ] wire up SessionManager.
-6. [ ] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
+6. [x] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
 7. [ ] setup vibebox commands
 8. [ ] setup cli commands.
 9. [ ] fix ui overlap.
@@ -53,8 +53,8 @@
 
 ## Stage 2
 
-1. [ ] Redirect vm output to log.
-2. [ ] Redirect vm output to vibebox starting it.
-3. [ ] use anyhow to sync api.
-
-[ ]
+1. [ ] retouch the cli ux.
+2. [ ] refactor the code.
+3. [ ] Redirect vm output to log.
+4. [ ] Redirect vm output to vibebox starting it.
+5. [ ] use anyhow to sync api.

@@ -5,35 +5,43 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
-use uuid::Uuid;
 
 pub const INSTANCE_DIR_NAME: &str = ".vibebox";
+pub const GLOBAL_CACHE_DIR_NAME: &str = "vibebox";
 pub const GLOBAL_DIR_NAME: &str = ".vibebox";
-pub const SESSION_INDEX_FILENAME: &str = "sessions.toml";
+pub const GLOBAL_SESSION_FILENAME: &str = "session.toml";
 pub const SESSION_TEMP_PREFIX: &str = "sessions";
 pub const SESSION_TOML_SUFFIX: &str = ".toml";
+use crate::config::CONFIG_FILENAME;
+pub const INSTANCE_TOML_FILENAME: &str = "instance.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {
-    pub id: Uuid,
     pub directory: PathBuf,
-    #[serde(with = "time::serde::rfc3339")]
-    pub last_active: OffsetDateTime,
     #[serde(default)]
-    pub ref_count: u64,
+    pub id: Option<String>,
+    #[serde(default)]
+    pub last_active: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct SessionIndex {
+struct GlobalSessionIndex {
     #[serde(default)]
-    sessions: Vec<SessionRecord>,
+    directories: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct InstanceMetadata {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    last_active: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct SessionManager {
     global_dir: PathBuf,
-    index_path: PathBuf,
+    session_path: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -44,12 +52,6 @@ pub enum SessionError {
     NonAbsoluteDirectory(PathBuf),
     #[error("Session directory does not exist: {0}")]
     MissingDirectory(PathBuf),
-    #[error("Session already exists for directory: {0}")]
-    DirectoryAlreadyHasSession(PathBuf),
-    #[error("Session not found: {0}")]
-    SessionNotFound(Uuid),
-    #[error("Ref count underflow for session: {0}")]
-    RefCountUnderflow(Uuid),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -67,163 +69,55 @@ impl SessionManager {
     }
 
     pub fn with_global_dir(global_dir: PathBuf) -> Self {
-        let index_path = global_dir.join(SESSION_INDEX_FILENAME);
+        let session_path = global_dir.join(GLOBAL_SESSION_FILENAME);
         Self {
             global_dir,
-            index_path,
+            session_path,
         }
     }
 
     pub fn index_path(&self) -> &Path {
-        &self.index_path
+        &self.session_path
     }
 
-    pub fn create_session(&self, directory: &Path) -> Result<SessionRecord, SessionError> {
+    pub fn update_global_sessions(&self, directory: &Path) -> Result<Vec<PathBuf>, SessionError> {
         let directory = self.normalize_directory(directory)?;
-        let mut index = self.read_index()?;
+        let mut index = self.read_global_index()?;
+        let mut changed = false;
 
-        if index.sessions.iter().any(|s| s.directory == directory) {
-            return Err(SessionError::DirectoryAlreadyHasSession(directory));
+        let removed = prune_invalid_dirs(&mut index);
+        if removed > 0 {
+            changed = true;
         }
 
-        let now = OffsetDateTime::now_utc();
-        let session = SessionRecord {
-            id: Uuid::now_v7(),
-            directory: directory.clone(),
-            last_active: now,
-            ref_count: 1,
-        };
-
-        fs::create_dir_all(self.instance_dir_for(&directory))?;
-        index.sessions.push(session.clone());
-        self.write_index(&index)?;
-
-        Ok(session)
-    }
-
-    pub fn get_or_create_session(&self, directory: &Path) -> Result<SessionRecord, SessionError> {
-        let directory = self.normalize_directory(directory)?;
-        let mut index = self.read_index()?;
-
-        if let Some(pos) = index.sessions.iter().position(|s| s.directory == directory) {
-            if !self
-                .instance_dir_for(&index.sessions[pos].directory)
-                .is_dir()
-            {
-                index.sessions.remove(pos);
-            } else {
-                let now = OffsetDateTime::now_utc();
-                let session = &mut index.sessions[pos];
-                session.ref_count = session.ref_count.saturating_add(1);
-                session.last_active = now;
-                let updated = session.clone();
-                self.write_index(&index)?;
-                return Ok(updated);
-            }
+        if is_vibebox_dir(&directory) && !index.directories.iter().any(|dir| dir == &directory) {
+            index.directories.push(directory);
+            changed = true;
         }
 
-        let now = OffsetDateTime::now_utc();
-        let session = SessionRecord {
-            id: Uuid::now_v7(),
-            directory: directory.clone(),
-            last_active: now,
-            ref_count: 1,
-        };
+        if changed {
+            self.write_global_index(&index)?;
+        }
 
-        fs::create_dir_all(self.instance_dir_for(&directory))?;
-        index.sessions.push(session.clone());
-        self.write_index(&index)?;
-
-        Ok(session)
+        Ok(index.directories)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>, SessionError> {
-        let mut index = self.read_index()?;
-        let removed = self.remove_orphans(&mut index);
+        let mut index = self.read_global_index()?;
+        let removed = prune_invalid_dirs(&mut index);
         if removed > 0 {
-            self.write_index(&index)?;
+            self.write_global_index(&index)?;
         }
-        Ok(index.sessions)
-    }
-
-    pub fn delete_session(&self, id: Uuid) -> Result<bool, SessionError> {
-        let mut index = self.read_index()?;
-        let Some(pos) = index.sessions.iter().position(|s| s.id == id) else {
-            return Ok(false);
-        };
-
-        let session = index.sessions.remove(pos);
-        let instance_dir = self.instance_dir_for(&session.directory);
-        match fs::remove_dir_all(&instance_dir) {
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
+        let mut sessions = Vec::with_capacity(index.directories.len());
+        for directory in index.directories {
+            let meta = read_instance_metadata(&directory)?;
+            sessions.push(SessionRecord {
+                directory,
+                id: meta.id,
+                last_active: meta.last_active,
+            });
         }
-
-        self.write_index(&index)?;
-        Ok(true)
-    }
-
-    pub fn bump_last_active(&self, id: Uuid) -> Result<SessionRecord, SessionError> {
-        let now = OffsetDateTime::now_utc();
-        self.update_session(id, |session| {
-            session.last_active = now;
-            Ok(())
-        })
-    }
-
-    pub fn increment_ref_count(&self, id: Uuid) -> Result<SessionRecord, SessionError> {
-        let now = OffsetDateTime::now_utc();
-        self.update_session(id, |session| {
-            session.ref_count = session.ref_count.saturating_add(1);
-            session.last_active = now;
-            Ok(())
-        })
-    }
-
-    pub fn decrement_ref_count(&self, id: Uuid) -> Result<SessionRecord, SessionError> {
-        let now = OffsetDateTime::now_utc();
-        self.update_session(id, |session| {
-            if session.ref_count == 0 {
-                return Err(SessionError::RefCountUnderflow(id));
-            }
-            session.ref_count -= 1;
-            session.last_active = now;
-            Ok(())
-        })
-    }
-
-    pub fn cleanup_orphans(&self) -> Result<usize, SessionError> {
-        let mut index = self.read_index()?;
-        let removed = self.remove_orphans(&mut index);
-        if removed > 0 {
-            self.write_index(&index)?;
-        }
-        Ok(removed)
-    }
-
-    fn update_session<F>(&self, id: Uuid, mut update: F) -> Result<SessionRecord, SessionError>
-    where
-        F: FnMut(&mut SessionRecord) -> Result<(), SessionError>,
-    {
-        let mut index = self.read_index()?;
-        let Some(pos) = index.sessions.iter().position(|s| s.id == id) else {
-            return Err(SessionError::SessionNotFound(id));
-        };
-
-        if !self
-            .instance_dir_for(&index.sessions[pos].directory)
-            .is_dir()
-        {
-            index.sessions.remove(pos);
-            self.write_index(&index)?;
-            return Err(SessionError::SessionNotFound(id));
-        }
-
-        update(&mut index.sessions[pos])?;
-        let updated = index.sessions[pos].clone();
-        self.write_index(&index)?;
-        Ok(updated)
+        Ok(sessions)
     }
 
     fn normalize_directory(&self, directory: &Path) -> Result<PathBuf, SessionError> {
@@ -236,32 +130,55 @@ impl SessionManager {
         Ok(directory.canonicalize()?)
     }
 
-    fn instance_dir_for(&self, directory: &Path) -> PathBuf {
-        directory.join(INSTANCE_DIR_NAME)
-    }
-
-    fn remove_orphans(&self, index: &mut SessionIndex) -> usize {
-        let before = index.sessions.len();
-        index
-            .sessions
-            .retain(|s| self.instance_dir_for(&s.directory).is_dir());
-        before - index.sessions.len()
-    }
-
-    fn read_index(&self) -> Result<SessionIndex, SessionError> {
-        if !self.index_path.exists() {
-            return Ok(SessionIndex::default());
+    fn read_global_index(&self) -> Result<GlobalSessionIndex, SessionError> {
+        if !self.session_path.exists() {
+            return Ok(GlobalSessionIndex::default());
         }
-        let content = fs::read_to_string(&self.index_path)?;
+        let content = fs::read_to_string(&self.session_path)?;
         Ok(toml::from_str(&content)?)
     }
 
-    fn write_index(&self, index: &SessionIndex) -> Result<(), SessionError> {
+    fn write_global_index(&self, index: &GlobalSessionIndex) -> Result<(), SessionError> {
         fs::create_dir_all(&self.global_dir)?;
         let content = toml::to_string_pretty(index)?;
-        atomic_write(&self.index_path, content.as_bytes())?;
+        atomic_write(&self.session_path, content.as_bytes())?;
         Ok(())
     }
+}
+
+fn is_vibebox_dir(directory: &Path) -> bool {
+    if !directory.is_absolute() {
+        return false;
+    }
+    directory.join(CONFIG_FILENAME).is_file()
+}
+
+fn prune_invalid_dirs(index: &mut GlobalSessionIndex) -> usize {
+    let before = index.directories.len();
+    index.directories.retain(|dir| is_vibebox_dir(dir));
+    before - index.directories.len()
+}
+
+fn read_instance_metadata(directory: &Path) -> Result<InstanceMetadata, SessionError> {
+    let instance_path = directory
+        .join(INSTANCE_DIR_NAME)
+        .join(INSTANCE_TOML_FILENAME);
+    if !instance_path.exists() {
+        return Ok(InstanceMetadata::default());
+    }
+    let raw = fs::read_to_string(&instance_path)?;
+    let mut meta: InstanceMetadata = toml::from_str(&raw)?;
+    if let Some(id) = &meta.id {
+        if id.trim().is_empty() {
+            meta.id = None;
+        }
+    }
+    if let Some(last_active) = &meta.last_active {
+        if last_active.trim().is_empty() {
+            meta.last_active = None;
+        }
+    }
+    Ok(meta)
 }
 
 fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
@@ -288,7 +205,6 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
-    use time::OffsetDateTime;
 
     fn manager(temp: &TempDir) -> SessionManager {
         SessionManager::with_global_dir(temp.path().join("global"))
@@ -301,104 +217,17 @@ mod tests {
     }
 
     #[test]
-    fn create_session_writes_index_and_instance_dir() {
+    fn update_global_sessions_adds_directory() {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         let project_dir = create_project_dir(&temp);
+        fs::write(project_dir.join(VIBEBOX_CONFIG_FILENAME), "").unwrap();
 
-        let session = mgr.create_session(&project_dir).unwrap();
+        let dirs = mgr.update_global_sessions(&project_dir).unwrap();
 
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], project_dir.canonicalize().unwrap());
         assert!(mgr.index_path().exists());
-        assert_eq!(session.directory, project_dir.canonicalize().unwrap());
-        assert_eq!(session.ref_count, 1);
-        assert!(project_dir.join(INSTANCE_DIR_NAME).is_dir());
-    }
-
-    #[test]
-    fn create_session_rejects_non_absolute_directory() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-
-        let err = mgr.create_session(Path::new("relative/path")).unwrap_err();
-
-        assert!(matches!(err, SessionError::NonAbsoluteDirectory(_)));
-    }
-
-    #[test]
-    fn create_session_rejects_missing_directory() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let missing = temp.path().join("missing");
-
-        let err = mgr.create_session(&missing).unwrap_err();
-
-        assert!(matches!(err, SessionError::MissingDirectory(_)));
-    }
-
-    #[test]
-    fn create_session_rejects_duplicate_directory() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let project_dir = create_project_dir(&temp);
-
-        let _session = mgr.create_session(&project_dir).unwrap();
-        let err = mgr.create_session(&project_dir).unwrap_err();
-
-        assert!(matches!(err, SessionError::DirectoryAlreadyHasSession(_)));
-    }
-
-    #[test]
-    fn get_or_create_increments_ref_count_for_existing_session() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let project_dir = create_project_dir(&temp);
-
-        let first = mgr.create_session(&project_dir).unwrap();
-        let second = mgr.get_or_create_session(&project_dir).unwrap();
-
-        assert_eq!(first.id, second.id);
-        assert_eq!(second.ref_count, 2);
-    }
-
-    #[test]
-    fn decrement_ref_count_errors_on_underflow() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let project_dir = create_project_dir(&temp);
-
-        let session = mgr.create_session(&project_dir).unwrap();
-        let session = mgr.decrement_ref_count(session.id).unwrap();
-        assert_eq!(session.ref_count, 0);
-
-        let err = mgr.decrement_ref_count(session.id).unwrap_err();
-        assert!(matches!(err, SessionError::RefCountUnderflow(_)));
-    }
-
-    #[test]
-    fn list_sessions_cleans_orphans() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let project_dir = create_project_dir(&temp);
-
-        let _session = mgr.create_session(&project_dir).unwrap();
-        fs::remove_dir_all(project_dir.join(INSTANCE_DIR_NAME)).unwrap();
-
-        let sessions = mgr.list_sessions().unwrap();
-        assert!(sessions.is_empty());
-    }
-
-    #[test]
-    fn delete_session_removes_instance_dir_and_index() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let project_dir = create_project_dir(&temp);
-
-        let session = mgr.create_session(&project_dir).unwrap();
-        let removed = mgr.delete_session(session.id).unwrap();
-
-        assert!(removed);
-        assert!(!project_dir.join(INSTANCE_DIR_NAME).exists());
-        assert!(mgr.list_sessions().unwrap().is_empty());
     }
 
     #[test]
@@ -415,73 +244,45 @@ mod tests {
     }
 
     #[test]
-    fn bump_last_active_updates_timestamp() {
+    fn update_global_sessions_removes_missing_vibebox_toml() {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         let project_dir = create_project_dir(&temp);
+        fs::write(project_dir.join(VIBEBOX_CONFIG_FILENAME), "").unwrap();
 
-        let session = mgr.create_session(&project_dir).unwrap();
-        let before = session.last_active;
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let updated = mgr.bump_last_active(session.id).unwrap();
-        let now = OffsetDateTime::now_utc();
+        let _ = mgr.update_global_sessions(&project_dir).unwrap();
+        fs::remove_file(project_dir.join(VIBEBOX_CONFIG_FILENAME)).unwrap();
 
-        assert!(updated.last_active >= before);
-        assert!(updated.last_active <= now);
+        let dirs = mgr.update_global_sessions(&project_dir).unwrap();
+        assert!(dirs.is_empty());
     }
 
     #[test]
-    fn cleanup_orphans_returns_removed_count() {
+    fn list_sessions_reads_instance_metadata() {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         let project_dir = create_project_dir(&temp);
+        fs::write(project_dir.join(VIBEBOX_CONFIG_FILENAME), "").unwrap();
 
-        let _session = mgr.create_session(&project_dir).unwrap();
-        fs::remove_dir_all(project_dir.join(INSTANCE_DIR_NAME)).unwrap();
+        let instance_dir = project_dir.join(INSTANCE_DIR_NAME);
+        fs::create_dir_all(&instance_dir).unwrap();
+        fs::write(
+            instance_dir.join(INSTANCE_TOML_FILENAME),
+            "id = \"019bf290-cccc-7c23-ba1d-dce7e6d40693\"\nlast_active = \"2026-02-07T05:00:00Z\"\n",
+        )
+        .unwrap();
 
-        let removed = mgr.cleanup_orphans().unwrap();
-        assert_eq!(removed, 1);
-        assert!(mgr.list_sessions().unwrap().is_empty());
-    }
-
-    #[test]
-    fn increment_ref_count_updates_last_active() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let project_dir = create_project_dir(&temp);
-
-        let session = mgr.create_session(&project_dir).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let updated = mgr.increment_ref_count(session.id).unwrap();
-
-        assert_eq!(updated.ref_count, session.ref_count + 1);
-        assert!(updated.last_active >= session.last_active);
-    }
-
-    #[test]
-    fn decrement_ref_count_updates_last_active() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let project_dir = create_project_dir(&temp);
-
-        let session = mgr.create_session(&project_dir).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let updated = mgr.decrement_ref_count(session.id).unwrap();
-
-        assert_eq!(updated.ref_count, session.ref_count - 1);
-        assert!(updated.last_active >= session.last_active);
-    }
-
-    #[test]
-    fn list_sessions_returns_active_sessions() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let project_dir = create_project_dir(&temp);
-
-        let session = mgr.create_session(&project_dir).unwrap();
+        let _ = mgr.update_global_sessions(&project_dir).unwrap();
         let sessions = mgr.list_sessions().unwrap();
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, session.id);
+        assert_eq!(
+            sessions[0].id.as_deref(),
+            Some("019bf290-cccc-7c23-ba1d-dce7e6d40693")
+        );
+        assert_eq!(
+            sessions[0].last_active.as_deref(),
+            Some("2026-02-07T05:00:00Z")
+        );
     }
 }

@@ -1,4 +1,4 @@
-use crate::session_manager::INSTANCE_DIR_NAME;
+use crate::session_manager::{GLOBAL_CACHE_DIR_NAME, INSTANCE_DIR_NAME};
 use std::{
     env,
     ffi::OsString,
@@ -146,7 +146,7 @@ where
     let cache_home = env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home.join(".cache"));
-    let cache_dir = cache_home.join("vibe");
+    let cache_dir = cache_home.join(GLOBAL_CACHE_DIR_NAME);
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
 
     let instance_dir = project_root.join(INSTANCE_DIR_NAME);
