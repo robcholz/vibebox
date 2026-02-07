@@ -2,6 +2,7 @@ use std::{
     env, fs,
     io::{Read, Write},
     os::unix::{
+        fs::FileTypeExt,
         fs::PermissionsExt,
         io::AsRawFd,
         net::{UnixListener, UnixStream},
@@ -167,10 +168,18 @@ fn spawn_manager_process(
 fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard, Box<dyn std::error::Error>> {
     let instance_dir = ensure_instance_dir(project_root)?;
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
+    let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
     if let Ok(content) = fs::read_to_string(&pid_path) {
         if let Ok(pid) = content.trim().parse::<u32>() {
             if pid_is_alive(pid) {
-                return Err(format!("vm manager already running (pid {pid})").into());
+                if is_socket_path(&socket_path) {
+                    return Err(format!("vm manager already running (pid {pid})").into());
+                }
+                tracing::warn!(
+                    pid,
+                    path = %socket_path.display(),
+                    "stale pid file detected with missing socket"
+                );
             }
         }
         let _ = fs::remove_file(&pid_path);
@@ -190,6 +199,12 @@ fn cleanup_stale_manager(instance_dir: &Path) {
         }
     }
     let _ = fs::remove_file(&pid_path);
+}
+
+fn is_socket_path(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|meta| meta.file_type().is_socket())
+        .unwrap_or(false)
 }
 
 struct PidFileGuard {
