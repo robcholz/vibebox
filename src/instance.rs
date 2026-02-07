@@ -1,4 +1,3 @@
-use crate::session_manager::INSTANCE_TOML_FILENAME;
 use std::{
     env, fs,
     io::{self, Write},
@@ -20,7 +19,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
-    session_manager::INSTANCE_DIR_NAME,
+    session_manager::{INSTANCE_DIR_NAME, INSTANCE_TOML_FILENAME},
     tui::{self, AppState},
     vm::{self, LoginAction, VmInput},
 };
@@ -367,7 +366,8 @@ fn spawn_ssh_io(
     let log_path = instance_dir.join(SERIAL_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&log_path)
         .ok()
         .map(|file| Arc::new(Mutex::new(file)));

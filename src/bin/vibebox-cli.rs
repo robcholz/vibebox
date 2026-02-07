@@ -54,6 +54,10 @@ fn main() -> Result<()> {
     };
     let cwd = env::current_dir().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
     tracing::info!(cwd = %cwd.display(), "starting vibebox cli");
+    let auto_shutdown_ms = config::load_config(&cwd)
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?
+        .auto_shutdown_ms
+        .unwrap_or(DEFAULT_AUTO_SHUTDOWN_MS);
     if let Ok(manager) = SessionManager::new() {
         if let Err(err) = manager.update_global_sessions(&cwd) {
             tracing::warn!(error = %err, "failed to update global session list");
@@ -73,10 +77,6 @@ fn main() -> Result<()> {
         stdout.flush()?;
     }
 
-    let auto_shutdown_ms = config::load_config(&cwd)
-        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?
-        .auto_shutdown_ms
-        .unwrap_or(DEFAULT_AUTO_SHUTDOWN_MS);
     tracing::info!(auto_shutdown_ms, "auto shutdown config");
     let manager_conn = vm_manager::ensure_manager(&raw_args, auto_shutdown_ms)
         .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;

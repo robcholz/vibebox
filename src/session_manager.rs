@@ -6,28 +6,27 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::CONFIG_FILENAME;
+
 pub const INSTANCE_DIR_NAME: &str = ".vibebox";
 pub const GLOBAL_CACHE_DIR_NAME: &str = "vibebox";
 pub const GLOBAL_DIR_NAME: &str = ".vibebox";
-pub const GLOBAL_SESSION_FILENAME: &str = "session.toml";
+pub const INSTANCE_TOML_FILENAME: &str = "instance.toml";
 pub const SESSION_TEMP_PREFIX: &str = "sessions";
 pub const SESSION_TOML_SUFFIX: &str = ".toml";
-use crate::config::CONFIG_FILENAME;
-pub const INSTANCE_TOML_FILENAME: &str = "instance.toml";
+const SESSIONS_DIR_NAME: &str = "sessions";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub directory: PathBuf,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
+    pub id: String,
     pub last_active: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct GlobalSessionIndex {
-    #[serde(default)]
-    directories: Vec<PathBuf>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionEntry {
+    pub directory: PathBuf,
+    pub id: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -40,8 +39,7 @@ struct InstanceMetadata {
 
 #[derive(Debug)]
 pub struct SessionManager {
-    global_dir: PathBuf,
-    session_path: PathBuf,
+    sessions_dir: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,55 +67,84 @@ impl SessionManager {
     }
 
     pub fn with_global_dir(global_dir: PathBuf) -> Self {
-        let session_path = global_dir.join(GLOBAL_SESSION_FILENAME);
-        Self {
-            global_dir,
-            session_path,
-        }
+        let sessions_dir = global_dir.join(SESSIONS_DIR_NAME);
+        Self { sessions_dir }
     }
 
     pub fn index_path(&self) -> &Path {
-        &self.session_path
+        &self.sessions_dir
     }
 
     pub fn update_global_sessions(&self, directory: &Path) -> Result<Vec<PathBuf>, SessionError> {
         let directory = self.normalize_directory(directory)?;
-        let mut index = self.read_global_index()?;
-        let mut changed = false;
+        fs::create_dir_all(&self.sessions_dir)?;
 
-        let removed = prune_invalid_dirs(&mut index);
-        if removed > 0 {
-            changed = true;
+        let (mut sessions, removed) = self.prune_stale_sessions()?;
+        let has_config = is_vibebox_dir(&directory);
+        let mut added = false;
+
+        if has_config {
+            let meta = read_instance_metadata(&directory)?;
+            if let Some(id) = meta.id {
+                let record = SessionEntry {
+                    directory: directory.clone(),
+                    id: id.clone(),
+                };
+                self.write_session_record(&record)?;
+                if let Some(existing) = sessions.iter_mut().find(|s| s.id == id) {
+                    *existing = record;
+                } else {
+                    sessions.push(record);
+                }
+                added = true;
+            } else {
+                tracing::warn!(
+                    directory = %directory.display(),
+                    "missing session id in instance.toml"
+                );
+            }
         }
 
-        if is_vibebox_dir(&directory) && !index.directories.iter().any(|dir| dir == &directory) {
-            index.directories.push(directory);
-            changed = true;
+        if removed > 0 || added {
+            tracing::info!(
+                path = %self.sessions_dir.display(),
+                removed,
+                added,
+                entries = sessions.len(),
+                "updated global sessions"
+            );
+        } else {
+            tracing::debug!(
+                path = %self.sessions_dir.display(),
+                entries = sessions.len(),
+                has_config,
+                "global sessions unchanged"
+            );
         }
 
-        if changed {
-            self.write_global_index(&index)?;
-        }
-
-        Ok(index.directories)
+        Ok(sessions.into_iter().map(|s| s.directory).collect())
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>, SessionError> {
-        let mut index = self.read_global_index()?;
-        let removed = prune_invalid_dirs(&mut index);
+        let (sessions, removed) = self.prune_stale_sessions()?;
         if removed > 0 {
-            self.write_global_index(&index)?;
+            tracing::info!(
+                path = %self.sessions_dir.display(),
+                removed,
+                entries = sessions.len(),
+                "pruned stale sessions"
+            );
         }
-        let mut sessions = Vec::with_capacity(index.directories.len());
-        for directory in index.directories {
-            let meta = read_instance_metadata(&directory)?;
-            sessions.push(SessionRecord {
-                directory,
-                id: meta.id,
+        let mut records = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            let meta = read_instance_metadata(&session.directory)?;
+            records.push(SessionRecord {
+                directory: session.directory,
+                id: session.id,
                 last_active: meta.last_active,
             });
         }
-        Ok(sessions)
+        Ok(records)
     }
 
     fn normalize_directory(&self, directory: &Path) -> Result<PathBuf, SessionError> {
@@ -130,19 +157,54 @@ impl SessionManager {
         Ok(directory.canonicalize()?)
     }
 
-    fn read_global_index(&self) -> Result<GlobalSessionIndex, SessionError> {
-        if !self.session_path.exists() {
-            return Ok(GlobalSessionIndex::default());
-        }
-        let content = fs::read_to_string(&self.session_path)?;
-        Ok(toml::from_str(&content)?)
+    fn session_path_for(&self, id: &str) -> PathBuf {
+        let filename = format!("{id}.toml");
+        self.sessions_dir.join(filename)
     }
 
-    fn write_global_index(&self, index: &GlobalSessionIndex) -> Result<(), SessionError> {
-        fs::create_dir_all(&self.global_dir)?;
-        let content = toml::to_string_pretty(index)?;
-        atomic_write(&self.session_path, content.as_bytes())?;
+    fn write_session_record(&self, record: &SessionEntry) -> Result<(), SessionError> {
+        fs::create_dir_all(&self.sessions_dir)?;
+        let path = self.session_path_for(&record.id);
+        let content = toml::to_string_pretty(record)?;
+        atomic_write(&path, content.as_bytes())?;
+        tracing::info!(
+            path = %path.display(),
+            "wrote session record"
+        );
         Ok(())
+    }
+
+    fn prune_stale_sessions(&self) -> Result<(Vec<SessionEntry>, usize), SessionError> {
+        if !self.sessions_dir.exists() {
+            return Ok((Vec::new(), 0));
+        }
+
+        let mut sessions = Vec::new();
+        let mut removed = 0usize;
+
+        for entry in fs::read_dir(&self.sessions_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let record = read_session_file(&path)?;
+            if !is_vibebox_dir(&record.directory) {
+                let _ = fs::remove_file(&path);
+                removed += 1;
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem != record.id {
+                    let _ = fs::remove_file(&path);
+                    removed += 1;
+                    continue;
+                }
+            }
+            sessions.push(record);
+        }
+
+        Ok((sessions, removed))
     }
 }
 
@@ -153,10 +215,13 @@ fn is_vibebox_dir(directory: &Path) -> bool {
     directory.join(CONFIG_FILENAME).is_file()
 }
 
-fn prune_invalid_dirs(index: &mut GlobalSessionIndex) -> usize {
-    let before = index.directories.len();
-    index.directories.retain(|dir| is_vibebox_dir(dir));
-    before - index.directories.len()
+fn read_session_file(path: &Path) -> Result<SessionEntry, SessionError> {
+    let raw = fs::read_to_string(path)?;
+    let record: SessionEntry = toml::from_str(&raw)?;
+    if record.id.trim().is_empty() {
+        return Err(std::io::Error::new(io::ErrorKind::InvalidData, "session id missing").into());
+    }
+    Ok(record)
 }
 
 fn read_instance_metadata(directory: &Path) -> Result<InstanceMetadata, SessionError> {
@@ -216,31 +281,35 @@ mod tests {
         dir
     }
 
+    fn write_instance(project_dir: &Path, id: &str, last_active: &str) {
+        let instance_dir = project_dir.join(INSTANCE_DIR_NAME);
+        fs::create_dir_all(&instance_dir).unwrap();
+        let content = format!("id = \"{id}\"\nlast_active = \"{last_active}\"\n");
+        fs::write(instance_dir.join(INSTANCE_TOML_FILENAME), content).unwrap();
+    }
+
     #[test]
     fn update_global_sessions_adds_directory() {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         let project_dir = create_project_dir(&temp);
-        fs::write(project_dir.join(VIBEBOX_CONFIG_FILENAME), "").unwrap();
+        fs::write(project_dir.join(CONFIG_FILENAME), "").unwrap();
+        write_instance(
+            &project_dir,
+            "019bf290-cccc-7c23-ba1d-dce7e6d40693",
+            "2026-02-07T05:00:00Z",
+        );
 
         let dirs = mgr.update_global_sessions(&project_dir).unwrap();
 
         assert_eq!(dirs.len(), 1);
         assert_eq!(dirs[0], project_dir.canonicalize().unwrap());
         assert!(mgr.index_path().exists());
-    }
 
-    #[test]
-    fn invalid_toml_returns_error() {
-        let temp = TempDir::new().unwrap();
-        let mgr = manager(&temp);
-        let index_path = mgr.index_path();
-        fs::create_dir_all(index_path.parent().unwrap()).unwrap();
-        fs::write(index_path, "this is not toml").unwrap();
-
-        let err = mgr.list_sessions().unwrap_err();
-
-        assert!(matches!(err, SessionError::TomlDe(_)));
+        let session_path = mgr
+            .index_path()
+            .join("019bf290-cccc-7c23-ba1d-dce7e6d40693.toml");
+        assert!(session_path.exists());
     }
 
     #[test]
@@ -248,38 +317,51 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         let project_dir = create_project_dir(&temp);
-        fs::write(project_dir.join(VIBEBOX_CONFIG_FILENAME), "").unwrap();
-
+        fs::write(project_dir.join(CONFIG_FILENAME), "").unwrap();
+        write_instance(
+            &project_dir,
+            "019bf290-cccc-7c23-ba1d-dce7e6d40693",
+            "2026-02-07T05:00:00Z",
+        );
         let _ = mgr.update_global_sessions(&project_dir).unwrap();
-        fs::remove_file(project_dir.join(VIBEBOX_CONFIG_FILENAME)).unwrap();
 
-        let dirs = mgr.update_global_sessions(&project_dir).unwrap();
-        assert!(dirs.is_empty());
+        fs::remove_file(project_dir.join(CONFIG_FILENAME)).unwrap();
+        let sessions = mgr.list_sessions().unwrap();
+        assert!(sessions.is_empty());
+
+        let session_path = mgr
+            .index_path()
+            .join("019bf290-cccc-7c23-ba1d-dce7e6d40693.toml");
+        assert!(!session_path.exists());
     }
 
     #[test]
-    fn list_sessions_reads_instance_metadata() {
+    fn invalid_toml_returns_error() {
+        let temp = TempDir::new().unwrap();
+        let mgr = manager(&temp);
+        fs::create_dir_all(mgr.index_path()).unwrap();
+        fs::write(mgr.index_path().join("bad.toml"), "not toml").unwrap();
+
+        let err = mgr.list_sessions().unwrap_err();
+        assert!(matches!(err, SessionError::TomlDe(_)));
+    }
+
+    #[test]
+    fn list_sessions_reads_session_files() {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         let project_dir = create_project_dir(&temp);
-        fs::write(project_dir.join(VIBEBOX_CONFIG_FILENAME), "").unwrap();
-
-        let instance_dir = project_dir.join(INSTANCE_DIR_NAME);
-        fs::create_dir_all(&instance_dir).unwrap();
-        fs::write(
-            instance_dir.join(INSTANCE_TOML_FILENAME),
-            "id = \"019bf290-cccc-7c23-ba1d-dce7e6d40693\"\nlast_active = \"2026-02-07T05:00:00Z\"\n",
-        )
-        .unwrap();
-
-        let _ = mgr.update_global_sessions(&project_dir).unwrap();
-        let sessions = mgr.list_sessions().unwrap();
-
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(
-            sessions[0].id.as_deref(),
-            Some("019bf290-cccc-7c23-ba1d-dce7e6d40693")
+        fs::write(project_dir.join(CONFIG_FILENAME), "").unwrap();
+        write_instance(
+            &project_dir,
+            "019bf290-cccc-7c23-ba1d-dce7e6d40693",
+            "2026-02-07T05:00:00Z",
         );
+        let _ = mgr.update_global_sessions(&project_dir).unwrap();
+
+        let sessions = mgr.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "019bf290-cccc-7c23-ba1d-dce7e6d40693");
         assert_eq!(
             sessions[0].last_active.as_deref(),
             Some("2026-02-07T05:00:00Z")

@@ -135,7 +135,8 @@ fn spawn_manager_process(
     let log_path = instance_dir.join("vm_manager.log");
     let log_file = fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&log_path)
         .ok();
     if let Some(file) = log_file {
@@ -282,7 +283,8 @@ fn spawn_manager_io(
     let log_path = instance_dir.join("serial.log");
     let log_file = fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&log_path)
         .ok()
         .map(|file| Arc::new(Mutex::new(file)));

@@ -39,16 +39,17 @@
 2. [x] Use ssh to connect to vm.
 3. [x] allow multi vibebox to connect to the same vm.
 4. [x] use vm.lock to ensure process concurrency safety.
-5. [ ] wire up SessionManager.
+5. [x] wire up SessionManager.
 6. [x] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
 7. [ ] setup vibebox commands
 8. [ ] setup cli commands.
 9. [ ] fix ui overlap.
+10. [ ] intensive integration test.
 
 ## Publish
 
-1. [ ] write the docs
-2. [ ] setup quick link.
+1. [ ] write the docs.
+2. [ ] setup quick install link.
 3. [ ] setup website.
 
 ## Stage 2
