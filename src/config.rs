@@ -41,7 +41,7 @@ impl Default for BoxConfig {
         Self {
             cpu_count: default_cpu_count(),
             ram_mb: default_ram_mb(),
-            mounts: Vec::new(),
+            mounts: default_mounts(),
         }
     }
 }
@@ -69,6 +69,24 @@ fn default_ram_mb() -> u64 {
 
 fn default_auto_shutdown_ms() -> u64 {
     DEFAULT_AUTO_SHUTDOWN_MS
+}
+
+fn default_mounts() -> Vec<String> {
+    let home = match std::env::var("HOME") {
+        Ok(home) => PathBuf::from(home),
+        Err(_) => return Vec::new(),
+    };
+
+    let mut mounts = Vec::new();
+    let codex_host = home.join(".codex");
+    if codex_host.exists() {
+        mounts.push("~/.codex:/usr/local/codex:read-write".to_string());
+    }
+    let claude_host = home.join(".claude");
+    if claude_host.exists() {
+        mounts.push("~/.claude:/usr/local/claude:read-write".to_string());
+    }
+    mounts
 }
 
 pub fn config_path(project_root: &Path) -> PathBuf {

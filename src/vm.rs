@@ -83,7 +83,7 @@ impl DirectoryShare {
         if parts.len() < 2 || parts.len() > 3 {
             return Err(format!("Invalid mount spec: {spec}").into());
         }
-        let host = PathBuf::from(parts[0]);
+        let host = expand_tilde_path(parts[0]);
         let guest = PathBuf::from(parts[1]);
         let read_only = if parts.len() == 3 {
             match parts[2] {
@@ -115,6 +115,19 @@ impl DirectoryShare {
             .unwrap_or("share".into());
         format!("{}_{:016x}", base_name, hash)
     }
+}
+
+fn expand_tilde_path(value: &str) -> PathBuf {
+    if let Some(stripped) = value.strip_prefix("~/") {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join(stripped);
+        }
+    } else if value == "~" {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(value)
 }
 
 pub struct VmArg {
@@ -206,17 +219,6 @@ where
         );
 
         directory_shares.push(mise_directory_share);
-
-        // Add default shares, if they exist
-        for share in [
-            DirectoryShare::new(home.join(".codex"), "/usr/local/codex".into(), false),
-            DirectoryShare::new(home.join(".claude"), "/usr/local/claude".into(), false),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            directory_shares.push(share)
-        }
     }
 
     directory_shares.extend(extra_directory_shares);

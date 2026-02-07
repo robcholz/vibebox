@@ -1,7 +1,10 @@
 [box]
 cpu_count = 2
 ram_mb = 2048
-mounts = []
+mounts = [
+    "~/.codex:/usr/local/codex:read-write",
+    "~/.claude:/usr/local/claude:read-write",
+]
 
 [supervisor]
 auto_shutdown_ms = 20000
