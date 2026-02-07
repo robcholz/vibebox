@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod instance;
 pub mod session_manager;
 pub mod tui;

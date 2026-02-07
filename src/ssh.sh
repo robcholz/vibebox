@@ -77,6 +77,21 @@ if [ ! -e "${USER_HOME}/.claude" ]; then
 fi
 chown -h "${SSH_USER}:${SSH_USER}" "${USER_HOME}/.codex" "${USER_HOME}/.claude" 2>/dev/null || true
 
+# Vibebox shell commands
+install -d -m 755 /etc/profile.d
+cat > /etc/profile.d/vibebox.sh <<'VIBEBOX_SHELL_EOF'
+__VIBEBOX_SHELL_SCRIPT__
+VIBEBOX_SHELL_EOF
+chmod 644 /etc/profile.d/vibebox.sh
+
+if ! grep -q "vibebox-aliases" "${USER_HOME}/.bashrc" 2>/dev/null; then
+  {
+    echo ""
+    echo "# vibebox-aliases"
+    echo ". /etc/profile.d/vibebox.sh"
+  } >> "${USER_HOME}/.bashrc"
+fi
+
 # Install Mise
 MISE_BIN="${USER_HOME}/.local/bin/mise"
 if [ ! -x "$MISE_BIN" ] && ! command -v mise >/dev/null 2>&1; then

@@ -9,9 +9,9 @@ use color_eyre::Result;
 use tracing_subscriber::EnvFilter;
 
 use vibebox::tui::{AppState, VmInfo};
-use vibebox::{SessionManager, config, instance, tui, vm, vm_manager};
+use vibebox::{SessionManager, commands, config, instance, tui, vm, vm_manager};
 
-const DEFAULT_AUTO_SHUTDOWN_MS: u64 = 3000;
+const DEFAULT_AUTO_SHUTDOWN_MS: u64 = 30000;
 
 fn main() -> Result<()> {
     init_tracing();
@@ -65,7 +65,8 @@ fn main() -> Result<()> {
     } else {
         tracing::warn!("failed to initialize session manager");
     }
-    let app = Arc::new(Mutex::new(AppState::new(cwd.clone(), vm_info)));
+    let commands = commands::build_commands();
+    let app = Arc::new(Mutex::new(AppState::new(cwd.clone(), vm_info, commands)));
 
     {
         let mut locked = app.lock().expect("app state poisoned");
