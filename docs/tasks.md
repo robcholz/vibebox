@@ -48,7 +48,8 @@
    3. [x] add an actual config file.
    4. [x] set up the cli.
 9. [ ] fix ui overlap, and consistency issue.
-10. [ ] intensive integration test.
+10. [ ] `clean_cache` to cleanup the cache.
+11. [ ] intensive integration test.
 
 ## Publish
 

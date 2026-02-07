@@ -72,7 +72,6 @@ pub fn run_with_ssh(manager_conn: UnixStream) -> Result<(), Box<dyn std::error::
     tracing::debug!(ssh_user = %ssh_user, "loaded instance config");
 
     let _manager_conn = manager_conn;
-    tracing::debug!("waiting for vm ipv4");
     wait_for_vm_ipv4(&instance_dir, Duration::from_secs(120))?;
 
     let ip = load_or_create_instance_config(&instance_dir)?
@@ -247,7 +246,8 @@ fn wait_for_vm_ipv4(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let mut next_log_at = start + Duration::from_secs(10);
-    tracing::debug!("waiting for vm ipv4");
+    tracing::info!("waiting for vm ipv4");
+    let mut once_hint = false;
     loop {
         let config = load_or_create_instance_config(instance_dir)?;
         if config.vm_ipv4.is_some() {
@@ -258,7 +258,13 @@ fn wait_for_vm_ipv4(
         }
         if Instant::now() >= next_log_at {
             let waited = start.elapsed();
-            tracing::debug!("still waiting for vm ipv4, {}s elapsed", waited.as_secs(),);
+            if waited.as_secs() > 15 && !once_hint {
+                tracing::info!(
+                    "if vibebox is just initialized in this directory, it might take up to 1 minutes depending on your machine, and then you can enjoy the speed vibecoding! go pack!"
+                );
+                once_hint = true;
+            }
+            tracing::info!("still waiting for vm ipv4, {}s elapsed", waited.as_secs(),);
             next_log_at += Duration::from_secs(10);
         }
         thread::sleep(Duration::from_millis(200));
