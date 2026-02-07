@@ -42,11 +42,11 @@
 5. [x] wire up SessionManager.
 6. [x] VM should be separated by a per-session VM daemon process (only accepts if to shut down vm and itself).
 7. [x] setup vibebox commands
-8. [ ] setup cli commands.
+8. [x] setup cli commands.
    1. [x] Organize all the params.
    2. [x] Remove old cli.
    3. [x] add an actual config file.
-   4. [ ] set up the cli.
+   4. [x] set up the cli.
 9. [ ] fix ui overlap, and consistency issue.
 10. [ ] intensive integration test.
 

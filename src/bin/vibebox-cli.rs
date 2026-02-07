@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::OsString,
     io::{self, IsTerminal, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -32,6 +32,8 @@ enum Command {
     List,
     /// Delete the current project's .vibebox directory
     Clean,
+    /// Explain mounts and mappings
+    Explain,
 }
 
 fn main() -> Result<()> {
@@ -42,7 +44,7 @@ fn main() -> Result<()> {
     let cwd = env::current_dir().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
     tracing::info!(cwd = %cwd.display(), "starting vibebox cli");
     if let Some(command) = cli.command {
-        return handle_command(command, &cwd);
+        return handle_command(command, &cwd, cli.config.as_deref());
     }
 
     let config_override = cli.config.clone();
@@ -111,7 +113,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle_command(command: Command, cwd: &PathBuf) -> Result<()> {
+fn handle_command(command: Command, cwd: &PathBuf, config_override: Option<&Path>) -> Result<()> {
     match command {
         Command::List => {
             let manager = SessionManager::new()?;
@@ -162,6 +164,16 @@ fn handle_command(command: Command, cwd: &PathBuf) -> Result<()> {
                 summary.removed_instance_dir,
                 summary.removed_sessions
             );
+            Ok(())
+        }
+        Command::Explain => {
+            let config = config::load_config_with_path(cwd, config_override);
+            let rows = build_mount_rows(cwd, &config)?;
+            if rows.is_empty() {
+                println!("No mounts configured.");
+                return Ok(());
+            }
+            tui::render_mounts_table(&rows)?;
             Ok(())
         }
     }
@@ -229,6 +241,100 @@ fn format_last_active(value: Option<&str>) -> String {
     }
     let days = seconds / (60 * 60 * 24);
     format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
+}
+
+fn build_mount_rows(cwd: &Path, config: &config::Config) -> Result<Vec<tui::MountListRow>> {
+    let mut rows = Vec::new();
+    rows.extend(default_mounts(cwd)?);
+    for spec in &config.box_cfg.mounts {
+        rows.push(parse_mount_spec(cwd, spec, false)?);
+    }
+    Ok(rows)
+}
+
+fn default_mounts(cwd: &Path) -> Result<Vec<tui::MountListRow>> {
+    let project_name = cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("project");
+    let project_guest = format!("/root/{project_name}");
+    let project_host = relative_to_home(&cwd.to_path_buf());
+    let mut rows = vec![tui::MountListRow {
+        host: project_host,
+        guest: project_guest,
+        mode: "read-write".to_string(),
+        default_mount: "yes".to_string(),
+    }];
+
+    let home = env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
+    let cache_home = env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".cache"));
+    let cache_dir = cache_home.join(session_manager::GLOBAL_CACHE_DIR_NAME);
+    let guest_mise_cache = cache_dir.join(".guest-mise-cache");
+    rows.push(tui::MountListRow {
+        host: relative_to_home(&guest_mise_cache),
+        guest: "/root/.local/share/mise".to_string(),
+        mode: "read-write".to_string(),
+        default_mount: "yes".to_string(),
+    });
+    Ok(rows)
+}
+
+fn parse_mount_spec(cwd: &Path, spec: &str, default_mount: bool) -> Result<tui::MountListRow> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return Err(color_eyre::eyre::eyre!("invalid mount spec: {spec}"));
+    }
+    let host_part = parts[0];
+    let guest_part = parts[1];
+    let mode = if parts.len() == 3 {
+        match parts[2] {
+            "read-only" => "read-only",
+            "read-write" => "read-write",
+            other => {
+                return Err(color_eyre::eyre::eyre!(
+                    "invalid mount mode '{}'; expected read-only or read-write",
+                    other
+                ));
+            }
+        }
+    } else {
+        "read-write"
+    };
+    let host_path = resolve_host_path(cwd, host_part);
+    let host_display = relative_to_home(&host_path);
+    let guest_display = if Path::new(guest_part).is_absolute() {
+        guest_part.to_string()
+    } else {
+        format!("/root/{guest_part}")
+    };
+    Ok(tui::MountListRow {
+        host: host_display,
+        guest: guest_display,
+        mode: mode.to_string(),
+        default_mount: if default_mount { "yes" } else { "no" }.to_string(),
+    })
+}
+
+fn resolve_host_path(cwd: &Path, host: &str) -> PathBuf {
+    if let Some(stripped) = host.strip_prefix("~/") {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join(stripped);
+        }
+    } else if host == "~" {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    let host_path = PathBuf::from(host);
+    if host_path.is_absolute() {
+        host_path
+    } else {
+        cwd.join(host_path)
+    }
 }
 
 fn init_tracing() {

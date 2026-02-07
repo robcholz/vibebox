@@ -107,6 +107,14 @@ pub struct SessionListRow {
     pub id: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct MountListRow {
+    pub host: String,
+    pub guest: String,
+    pub mode: String,
+    pub default_mount: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PageLayout {
     header: Rect,
@@ -225,6 +233,58 @@ pub fn render_sessions_table(rows: &[SessionListRow]) -> Result<()> {
     .header(header)
     .block(Block::default().title("Sessions").borders(Borders::ALL))
     .column_spacing(2);
+
+    table.render(area, &mut buffer);
+
+    let mut stdout = io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Show)?;
+    write_buffer_with_style(&buffer, &mut stdout)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+pub fn render_mounts_table(rows: &[MountListRow]) -> Result<()> {
+    let (width, _) = crossterm::terminal::size()?;
+    if width == 0 {
+        return Ok(());
+    }
+
+    let height = (rows.len() as u16).saturating_add(3);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
+    let area = Rect::new(0, 0, width, height);
+
+    let header = Row::new(vec![
+        Cell::from("Host"),
+        Cell::from("Guest"),
+        Cell::from("Mode"),
+        Cell::from(""),
+        Cell::from("Default"),
+    ])
+    .style(Style::default().fg(Color::Cyan));
+
+    let table_rows = rows.iter().map(|row| {
+        Row::new(vec![
+            Cell::from(row.host.clone()),
+            Cell::from(row.guest.clone()),
+            Cell::from(row.mode.clone()),
+            Cell::from(""),
+            Cell::from(row.default_mount.clone()),
+        ])
+    });
+
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Min(24),
+            Constraint::Min(24),
+            Constraint::Length(10),
+            Constraint::Length(1),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(Block::default().title("Mounts").borders(Borders::ALL))
+    .column_spacing(1);
 
     table.render(area, &mut buffer);
 
