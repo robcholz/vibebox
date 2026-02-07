@@ -1,5 +1,5 @@
 use std::{
-    fs, io,
+    env, fs, io,
     path::{Path, PathBuf},
 };
 
@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::vm::DirectoryShare;
 
 pub const CONFIG_FILENAME: &str = "vibebox.toml";
+pub const CONFIG_PATH_ENV: &str = "VIBEBOX_CONFIG_PATH";
 
 const DEFAULT_CPU_COUNT: usize = 2;
 const DEFAULT_RAM_MB: u64 = 2048;
@@ -93,8 +94,11 @@ pub fn config_path(project_root: &Path) -> PathBuf {
     project_root.join(CONFIG_FILENAME)
 }
 
-pub fn ensure_config_file(project_root: &Path) -> Result<PathBuf, io::Error> {
-    let path = config_path(project_root);
+pub fn ensure_config_file(
+    project_root: &Path,
+    override_path: Option<&Path>,
+) -> Result<PathBuf, io::Error> {
+    let path = resolve_config_path(project_root, override_path);
     if !path.exists() {
         let default_config = Config::default();
         let contents = toml::to_string_pretty(&default_config).unwrap_or_default();
@@ -105,7 +109,11 @@ pub fn ensure_config_file(project_root: &Path) -> Result<PathBuf, io::Error> {
 }
 
 pub fn load_config(project_root: &Path) -> Config {
-    let path = match ensure_config_file(project_root) {
+    load_config_with_path(project_root, None)
+}
+
+pub fn load_config_with_path(project_root: &Path, override_path: Option<&Path>) -> Config {
+    let path = match ensure_config_file(project_root, override_path) {
         Ok(path) => path,
         Err(err) => die(&format!("failed to create config: {err}")),
     };
@@ -142,6 +150,54 @@ pub fn load_config(project_root: &Path) -> Config {
     };
     validate_or_exit(&config);
     config
+}
+
+fn resolve_config_path(project_root: &Path, override_path: Option<&Path>) -> PathBuf {
+    let root = match fs::canonicalize(project_root) {
+        Ok(root) => root,
+        Err(err) => die(&format!("failed to resolve project root: {err}")),
+    };
+
+    let override_path = override_path
+        .map(PathBuf::from)
+        .or_else(|| env::var_os(CONFIG_PATH_ENV).map(PathBuf::from));
+    let raw_path = if let Some(path) = override_path {
+        if path.is_absolute() {
+            path
+        } else {
+            project_root.join(path)
+        }
+    } else {
+        config_path(project_root)
+    };
+
+    let normalized = normalize_path(&raw_path);
+    if !normalized.starts_with(&root) {
+        die(&format!(
+            "config path must be within {}: {}",
+            root.display(),
+            normalized.display()
+        ));
+    }
+    normalized
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => {
+                normalized.push(std::path::MAIN_SEPARATOR.to_string());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let _ = normalized.pop();
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 fn validate_schema(value: &toml::Value) -> Vec<String> {

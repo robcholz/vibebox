@@ -20,7 +20,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Widget},
 };
 
 use crate::vm;
@@ -98,6 +98,15 @@ pub struct VibeboxCommand {
     pub description: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionListRow {
+    pub name: String,
+    pub directory: String,
+    pub last_active: String,
+    pub active: String,
+    pub id: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PageLayout {
     header: Rect,
@@ -169,6 +178,58 @@ pub fn render_commands_component(app: &mut AppState) -> Result<()> {
     render_completions(&mut buffer, area, app);
 
     let mut stdout = io::stdout();
+    write_buffer_with_style(&buffer, &mut stdout)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+pub fn render_sessions_table(rows: &[SessionListRow]) -> Result<()> {
+    let (width, _) = crossterm::terminal::size()?;
+    if width == 0 {
+        return Ok(());
+    }
+
+    let height = (rows.len() as u16).saturating_add(3);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
+    let area = Rect::new(0, 0, width, height);
+
+    let header = Row::new(vec![
+        Cell::from("Name"),
+        Cell::from("Last Active"),
+        Cell::from("Active"),
+        Cell::from("ID"),
+        Cell::from("Directory"),
+    ])
+    .style(Style::default().fg(Color::Cyan));
+
+    let table_rows = rows.iter().map(|row| {
+        Row::new(vec![
+            Cell::from(row.name.clone()),
+            Cell::from(row.last_active.clone()),
+            Cell::from(row.active.clone()),
+            Cell::from(row.id.clone()),
+            Cell::from(row.directory.clone()),
+        ])
+    });
+
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(16),
+            Constraint::Length(14),
+            Constraint::Length(8),
+            Constraint::Length(36),
+            Constraint::Min(24),
+        ],
+    )
+    .header(header)
+    .block(Block::default().title("Sessions").borders(Borders::ALL))
+    .column_spacing(2);
+
+    table.render(area, &mut buffer);
+
+    let mut stdout = io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Show)?;
     write_buffer_with_style(&buffer, &mut stdout)?;
     stdout.flush()?;
     Ok(())

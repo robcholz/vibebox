@@ -20,7 +20,7 @@ objc2-virtualization = "*"
 block2 = "*"
 dispatch2 = "*"
 libc = "*"
-lexopt = "0.3"
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 thiserror = "2.0.18"
@@ -29,10 +29,7 @@ toml = "0.9.8"
 uuid = { version = "1", features = ["v7", "serde"] }
 color-eyre = "0.6.3"
 crossterm = { version = "0.28.1", features = ["event-stream"] }
-futures = "0.3.31"
 ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
-tokio = { version = "1.40.0", features = ["full"] }
-tui-textarea = { version = "0.7.0", default-features = false, features = ["ratatui"] }
-unicode-width = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dialoguer = "0.12.0"
