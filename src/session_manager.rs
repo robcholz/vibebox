@@ -223,12 +223,12 @@ impl SessionManager {
                 removed += 1;
                 continue;
             }
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem != record.id {
-                    let _ = fs::remove_file(&path);
-                    removed += 1;
-                    continue;
-                }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && stem != record.id
+            {
+                let _ = fs::remove_file(&path);
+                removed += 1;
+                continue;
             }
             sessions.push(record);
         }
@@ -327,15 +327,15 @@ fn read_instance_metadata(directory: &Path) -> Result<InstanceMetadata, SessionE
     }
     let raw = fs::read_to_string(&instance_path)?;
     let mut meta: InstanceMetadata = toml::from_str(&raw)?;
-    if let Some(id) = &meta.id {
-        if id.trim().is_empty() {
-            meta.id = None;
-        }
+    if let Some(id) = &meta.id
+        && id.trim().is_empty()
+    {
+        meta.id = None;
     }
-    if let Some(last_active) = &meta.last_active {
-        if last_active.trim().is_empty() {
-            meta.last_active = None;
-        }
+    if let Some(last_active) = &meta.last_active
+        && last_active.trim().is_empty()
+    {
+        meta.last_active = None;
     }
     Ok(meta)
 }

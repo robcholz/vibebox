@@ -14,20 +14,11 @@ const DEFAULT_CPU_COUNT: usize = 2;
 const DEFAULT_RAM_MB: u64 = 2048;
 const DEFAULT_AUTO_SHUTDOWN_MS: u64 = 20000;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(rename = "box")]
     pub box_cfg: BoxConfig,
     pub supervisor: SupervisorConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            box_cfg: BoxConfig::default(),
-            supervisor: SupervisorConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -126,7 +126,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle_command(command: Command, cwd: &PathBuf, config_override: Option<&Path>) -> Result<()> {
+fn handle_command(command: Command, cwd: &Path, config_override: Option<&Path>) -> Result<()> {
     match command {
         Command::List => {
             let manager = SessionManager::new()?;
@@ -223,7 +223,7 @@ fn handle_command(command: Command, cwd: &PathBuf, config_override: Option<&Path
     }
 }
 
-fn project_name(directory: &PathBuf) -> String {
+fn project_name(directory: &Path) -> String {
     directory
         .file_name()
         .and_then(|name| name.to_str())
@@ -231,7 +231,7 @@ fn project_name(directory: &PathBuf) -> String {
         .to_string()
 }
 
-fn relative_to_home(directory: &PathBuf) -> String {
+fn relative_to_home(directory: &Path) -> String {
     let Ok(home) = env::var("HOME") else {
         return directory.display().to_string();
     };
@@ -323,7 +323,6 @@ fn format_last_active(value: Option<&str>) -> String {
     if seconds < 0 {
         seconds = 0;
     }
-    let seconds = seconds as i64;
     let week_seconds = 7 * 24 * 60 * 60;
     if seconds >= week_seconds {
         let formatted =

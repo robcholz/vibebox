@@ -170,21 +170,20 @@ fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard, Box<dyn std::err
     let instance_dir = ensure_instance_dir(project_root)?;
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
-    if let Ok(content) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = content.trim().parse::<u32>() {
-            if pid_is_alive(pid) {
-                if is_socket_path(&socket_path) {
-                    return Err(format!("vm manager already running (pid {pid})").into());
-                }
-                tracing::warn!(
-                    pid,
-                    path = %socket_path.display(),
-                    "stale pid file detected with missing socket"
-                );
-            }
+    if let Ok(content) = fs::read_to_string(&pid_path)
+        && let Ok(pid) = content.trim().parse::<u32>()
+        && pid_is_alive(pid)
+    {
+        if is_socket_path(&socket_path) {
+            return Err(format!("vm manager already running (pid {pid})").into());
         }
-        let _ = fs::remove_file(&pid_path);
+        tracing::warn!(
+            pid,
+            path = %socket_path.display(),
+            "stale pid file detected with missing socket"
+        );
     }
+    let _ = fs::remove_file(&pid_path);
     fs::write(&pid_path, format!("{}\n", std::process::id()))?;
     let _ = fs::set_permissions(&pid_path, fs::Permissions::from_mode(0o600));
     Ok(PidFileGuard { path: pid_path })
@@ -192,12 +191,11 @@ fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard, Box<dyn std::err
 
 fn cleanup_stale_manager(instance_dir: &Path) {
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
-    if let Ok(content) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = content.trim().parse::<u32>() {
-            if pid_is_alive(pid) {
-                return;
-            }
-        }
+    if let Ok(content) = fs::read_to_string(&pid_path)
+        && let Ok(pid) = content.trim().parse::<u32>()
+        && pid_is_alive(pid)
+    {
+        return;
     }
     let _ = fs::remove_file(&pid_path);
 }
@@ -423,7 +421,7 @@ fn read_client_pid(stream: &UnixStream) -> Option<u32> {
             Ok(0) => break,
             Ok(n) => {
                 len += n;
-                if buf[..len].iter().any(|b| *b == b'\n') || len == buf.len() {
+                if buf[..len].contains(&b'\n') || len == buf.len() {
                     break;
                 }
             }
@@ -467,10 +465,10 @@ fn spawn_manager_io(
     let mut line_buf = String::new();
 
     let on_output = move |bytes: &[u8]| {
-        if let Some(log) = &log_for_output {
-            if let Ok(mut file) = log.lock() {
-                let _ = file.write_all(bytes);
-            }
+        if let Some(log) = &log_for_output
+            && let Ok(mut file) = log.lock()
+        {
+            let _ = file.write_all(bytes);
         }
 
         let text = String::from_utf8_lossy(bytes);
@@ -483,17 +481,16 @@ fn spawn_manager_io(
             }
             line_buf.drain(..=pos);
 
-            let cleaned = line.trim_start_matches(|c: char| c == '\r' || c == ' ');
+            let cleaned = line.trim_start_matches(['\r', ' ']);
             if let Some(pos) = cleaned.find("VIBEBOX_IPV4=") {
                 let ip_raw = &cleaned[(pos + "VIBEBOX_IPV4=".len())..];
                 let ip = extract_ipv4(ip_raw).unwrap_or_default();
-                if !ip.is_empty() {
-                    if let Ok(mut cfg) = config_for_output.lock() {
-                        if cfg.vm_ipv4.as_deref() != Some(ip.as_str()) {
-                            cfg.vm_ipv4 = Some(ip.clone());
-                            let _ = write_instance_config(&instance_path, &cfg);
-                        }
-                    }
+                if !ip.is_empty()
+                    && let Ok(mut cfg) = config_for_output.lock()
+                    && cfg.vm_ipv4.as_deref() != Some(ip.as_str())
+                {
+                    cfg.vm_ipv4 = Some(ip.clone());
+                    let _ = write_instance_config(&instance_path, &cfg);
                 }
             }
         }
@@ -583,7 +580,7 @@ impl VmExecutor for RealVmExecutor {
         instance_dir: PathBuf,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let result = vm::run_with_args_and_extras(
+        vm::run_with_args_and_extras(
             args,
             |output_monitor, vm_output_fd, vm_input_fd| {
                 let io_ctx = spawn_manager_io(
@@ -598,8 +595,7 @@ impl VmExecutor for RealVmExecutor {
             },
             extra_login_actions,
             extra_shares,
-        );
-        result
+        )
     }
 }
 
@@ -755,9 +751,7 @@ fn manager_event_loop(
                 shutdown_sent = false;
             }
             Ok(ManagerEvent::Dec(pid)) => {
-                if ref_count > 0 {
-                    ref_count -= 1;
-                }
+                ref_count = ref_count.saturating_sub(1);
                 tracing::info!(
                     ref_count,
                     pid = pid.unwrap_or(0),
@@ -776,15 +770,16 @@ fn manager_event_loop(
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Some(deadline) = shutdown_deadline {
-                    if Instant::now() >= deadline && !shutdown_sent {
-                        if let Some(tx) = vm_input_tx.lock().unwrap().clone() {
-                            let _ = tx.send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()));
-                        }
-                        tracing::info!("shutdown command sent");
-                        shutdown_sent = true;
-                        shutdown_deadline = None;
+                if let Some(deadline) = shutdown_deadline
+                    && Instant::now() >= deadline
+                    && !shutdown_sent
+                {
+                    if let Some(tx) = vm_input_tx.lock().unwrap().clone() {
+                        let _ = tx.send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()));
                     }
+                    tracing::info!("shutdown command sent");
+                    shutdown_sent = true;
+                    shutdown_deadline = None;
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,

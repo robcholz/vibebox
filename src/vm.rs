@@ -155,10 +155,10 @@ fn expand_tilde_path(value: &str) -> PathBuf {
         if let Ok(home) = env::var("HOME") {
             return PathBuf::from(home).join(stripped);
         }
-    } else if value == "~" {
-        if let Ok(home) = env::var("HOME") {
-            return PathBuf::from(home);
-        }
+    } else if value == "~"
+        && let Ok(home) = env::var("HOME")
+    {
+        return PathBuf::from(home);
     }
     PathBuf::from(value)
 }
