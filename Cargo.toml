@@ -2,10 +2,19 @@
 name = "vibebox"
 version = "0.1.0"
 edition = "2024"
+authors = ["Finn Sheng"]
+description = "Ultrafast CLI on Apple Silicon macOS for fast, sandboxed development and LLM agents."
+homepage = "https://github.com/robcholz/vibebox"
+repository = "https://github.com/robcholz/vibebox"
+readme = "README.md"
+license = "MIT"
+categories = ["virtualization","command-line-utilities"]
+keywords = ["virtualization", "ai", "macos", "agent", "sandbox"]
+rust-version = "1.91.1"
 
 [dependencies]
-objc2 = "*"
-objc2-foundation = { version = "*", features = [
+objc2 = "0.6.3"
+objc2-foundation = { version = "0.3.2", features = [
     "NSArray",
     "NSString",
     "NSURL",
@@ -16,10 +25,10 @@ objc2-foundation = { version = "*", features = [
     "NSRunLoop",
     "NSObject",
 ] }
-objc2-virtualization = "*"
-block2 = "*"
-dispatch2 = "*"
-libc = "*"
+objc2-virtualization = "0.3.2"
+block2 = "0.6.2"
+dispatch2 = "0.3.0"
+libc = "0.2.180"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
