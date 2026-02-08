@@ -12,6 +12,11 @@ use tracing_subscriber::prelude::*;
 use vibebox::{config, instance, vm, vm_manager};
 
 fn main() -> Result<()> {
+    if env::var("VIBEBOX_INTERNAL").as_deref() != Ok("1") {
+        eprintln!("vibebox-supervisor is internal. Use `vibebox` instead.");
+        std::process::exit(2);
+    }
+
     init_tracing();
     color_eyre::install()?;
 

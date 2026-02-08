@@ -135,6 +135,7 @@ fn spawn_manager_process(
     if raw_args.len() > 1 {
         cmd.args(&raw_args[1..]);
     }
+    cmd.env("VIBEBOX_INTERNAL", "1");
     if !use_supervisor {
         cmd.env("VIBEBOX_VM_MANAGER", "1");
     }
