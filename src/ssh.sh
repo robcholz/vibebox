@@ -68,6 +68,15 @@ if [ -z "$USER_HOME" ]; then
   USER_HOME="/home/${SSH_USER}"
 fi
 
+run_as_user() {
+  runuser -u "$SSH_USER" -- env HOME="$USER_HOME" "$@"
+}
+
+# Ensure user cache dirs are writable (mise writes under ~/.cache/mise)
+install -d -m 700 -o "$SSH_USER" -g "$SSH_USER" "${USER_HOME}/.cache"
+install -d -m 700 -o "$SSH_USER" -g "$SSH_USER" "${USER_HOME}/.cache/mise"
+chown -R "$SSH_USER:$SSH_USER" "${USER_HOME}/.cache" 2>/dev/null || true
+
 # Home mount links (config-driven)
 __VIBEBOX_HOME_LINKS__
 
@@ -89,7 +98,7 @@ fi
 # Install Mise
 MISE_BIN="${USER_HOME}/.local/bin/mise"
 if [ ! -x "$MISE_BIN" ] && ! command -v mise >/dev/null 2>&1; then
-  curl https://mise.run | HOME="$USER_HOME" sh
+  run_as_user sh -c 'curl https://mise.run | sh'
 fi
 echo 'eval "$(~/.local/bin/mise activate bash)"' >> "${USER_HOME}/.bashrc"
 
@@ -113,10 +122,11 @@ MISE
 
 touch "${USER_HOME}/.config/mise/mise.lock"
 if [ -x "$MISE_BIN" ]; then
-  HOME="$USER_HOME" "$MISE_BIN" install
+  run_as_user "$MISE_BIN" install
 else
-  HOME="$USER_HOME" mise install
+  run_as_user mise install
 fi
+chown -R "$SSH_USER:$SSH_USER" "${USER_HOME}/.cache" "${USER_HOME}/.config/mise" "${USER_HOME}/.local/share/mise" 2>/dev/null || true
 
 # 3) start ssh (don't swallow failures)
 # If ssh is already active, don't force start/restart.
