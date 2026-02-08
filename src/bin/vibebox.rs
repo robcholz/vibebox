@@ -10,15 +10,15 @@ use std::{
 use clap::Parser;
 use color_eyre::Result;
 use dialoguer::Confirm;
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::registry::Registry;
-use tracing_subscriber::{fmt, prelude::*, reload, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 
 use vibebox::tui::{AppState, VmInfo};
 use vibebox::{
-    commands, config, explain, instance, session_manager, tui, vm, vm_manager, SessionManager,
+    SessionManager, commands, config, explain, instance, session_manager, tui, vm, vm_manager,
 };
 
 #[derive(Debug, Parser)]

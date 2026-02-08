@@ -82,7 +82,6 @@ const BASE_DISK_RAW_NAME: &str = "disk.raw";
 pub(crate) enum LoginAction {
     Expect { text: String, timeout: Duration },
     Send(String),
-    Script { path: PathBuf, index: usize },
 }
 use LoginAction::*;
 
@@ -279,16 +278,6 @@ where
         Some(&status_file),
         io_handler,
     )
-}
-
-fn script_command_from_path(
-    path: &Path,
-    index: usize,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let script = fs::read_to_string(path)
-        .map_err(|err| format!("Failed to read script {}: {err}", path.display()))?;
-    let label = format!("{}_{}", index, path.file_name().unwrap().display());
-    script_command_from_content(&label, &script)
 }
 
 pub(crate) fn script_command_from_content(
@@ -1012,18 +1001,6 @@ fn spawn_login_actions_thread(
                 }
                 Send(mut text) => {
                     text.push('\n'); // Type the newline so the command is actually submitted.
-                    input_tx.send(VmInput::Bytes(text.into_bytes())).unwrap();
-                }
-                Script { path, index } => {
-                    let command = match script_command_from_path(&path, index) {
-                        Ok(command) => command,
-                        Err(err) => {
-                            tracing::error!(error = %err, "failed to build login script command");
-                            return;
-                        }
-                    };
-                    let mut text = command;
-                    text.push('\n');
                     input_tx.send(VmInput::Bytes(text.into_bytes())).unwrap();
                 }
             }
