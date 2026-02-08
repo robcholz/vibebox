@@ -1,6 +1,7 @@
 use std::{
     env,
     ffi::OsString,
+    fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -34,8 +35,10 @@ struct Cli {
 enum Command {
     /// List all sessions
     List,
-    /// Delete the current project's .vibebox directory
-    Clean,
+    /// Reset the current project's .vibebox directory
+    Reset,
+    /// Purge the global cache directory
+    PurgeCache,
     /// Explain mounts and mappings
     Explain,
 }
@@ -147,7 +150,7 @@ fn handle_command(command: Command, cwd: &PathBuf, config_override: Option<&Path
             tui::render_sessions_table(&rows)?;
             Ok(())
         }
-        Command::Clean => {
+        Command::Reset => {
             let instance_dir = cwd.join(session_manager::INSTANCE_DIR_NAME);
             if !instance_dir.exists() {
                 println!("No .vibebox directory found at {}", instance_dir.display());
@@ -171,6 +174,34 @@ fn handle_command(command: Command, cwd: &PathBuf, config_override: Option<&Path
                 summary.instance_dir.display(),
                 summary.removed_instance_dir,
                 summary.removed_sessions
+            );
+            Ok(())
+        }
+        Command::PurgeCache => {
+            let cache_dir = cache_dir()?;
+            if !cache_dir.exists() {
+                println!("No cache directory found at {}", cache_dir.display());
+                return Ok(());
+            }
+            let (file_count, total_bytes) = measure_dir(&cache_dir)?;
+            let confirmed = Confirm::new()
+                .with_prompt(format!(
+                    "Delete cache directory {} and all its contents?",
+                    cache_dir.display()
+                ))
+                .default(false)
+                .interact()?;
+            if !confirmed {
+                println!("Cancelled.");
+                return Ok(());
+            }
+            fs::remove_dir_all(&cache_dir)?;
+            println!(
+                "Purged {} file{} totaling {} from {}",
+                file_count,
+                if file_count == 1 { "" } else { "s" },
+                format_bytes(total_bytes),
+                cache_dir.display()
             );
             Ok(())
         }
@@ -210,6 +241,71 @@ fn relative_to_home(directory: &PathBuf) -> String {
         return format!("~/{}", stripped.display());
     }
     directory.display().to_string()
+}
+
+fn cache_dir() -> Result<PathBuf> {
+    let home = env::var("HOME").map(PathBuf::from)?;
+    let cache_home = env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".cache"));
+    Ok(cache_home.join(session_manager::GLOBAL_CACHE_DIR_NAME))
+}
+
+fn measure_dir(path: &Path) -> Result<(u64, u64)> {
+    let mut total_bytes = 0u64;
+    let mut file_count = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(err) => {
+                tracing::warn!(path = %current.display(), error = %err, "failed to read directory");
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    tracing::warn!(path = %current.display(), error = %err, "failed to read directory entry");
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), error = %err, "failed to stat path");
+                    continue;
+                }
+            };
+            let file_type = metadata.file_type();
+            if file_type.is_dir() {
+                stack.push(path);
+            } else {
+                file_count += 1;
+                total_bytes = total_bytes.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok((file_count, total_bytes))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 fn format_last_active(value: Option<&str>) -> String {
