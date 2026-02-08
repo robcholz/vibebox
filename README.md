@@ -24,15 +24,37 @@
   <a href="README.zh.md">简体中文</a>
 </p>
 
-VibeBox is a lightweight, ultra-fast sandbox that lets AI agents run commands, modify files, and execute code freely
-without permission prompts securely. It is completely isolated using Apple's Virtualization Framework, so your actual
-system
-stays
-safe with minimal memory and disk usage.
+VibeBox is a lightweight, ultra-fast sandbox for AI agents to run commands, edit files, and execute code inside an
+isolated Apple Virtualization Framework micro-VM, no repeated permission prompts, minimal memory/disk overhead.
 
 [![VibeBox Terminal UI](docs/screenshot.png)](https://vibebox.robcholz.com)
 
 ---
+
+### Why I built VibeBox
+
+I use agents like Codex and CC a lot, but I always felt uneasy running them directly on my host machine. If I lock
+things
+down, I get interrupted by constant “are you sure?” prompts. If I loosen it up, I worry the agent might touch the
+wrong files or run something I didn’t intend.
+
+I wanted something that feels as frictionless as giving an agent a real shell, but with a hard isolation boundary. So I
+built VibeBox: a per-project micro-VM sandbox that starts fast, keeps changes contained to the repo, and lets me iterate
+without babysitting permissions.
+
+### Comparison
+
+Here’s why I didn’t just use existing options:
+
+- **vibe**: super convenient, but it’s too minimal for what I need. It lacks basic configuration, and it doesn’t give me
+  the multi-instance + session management my workflow wants.
+- **QEMU**: powerful, but the configuration surface area is huge. For day-to-day sandboxing it’s not “open a repo and
+  go” — it’s a project on its own.
+- **Docker / devcontainers**: great ecosystem, but for daily use it feels heavy. Cold starts can be slow, and it’s not
+  something I can jump into instantly, repeatedly, all day.
+
+That’s what pushed me to build **VibeBox**: I wanted a per-project sandbox that’s fast to enter (just `vibebox`),
+supports real configuration + sessions, and keeps a hard isolation boundary.
 
 ### Installation
 
