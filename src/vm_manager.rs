@@ -30,6 +30,7 @@ use crate::{
 
 const VM_MANAGER_LOCK_NAME: &str = "vm.lock";
 const VM_MANAGER_LOG_NAME: &str = "vm_manager.log";
+const HARD_SHUTDOWN_TIMEOUT_MS: u64 = 12_000;
 
 pub fn ensure_manager(
     raw_args: &[std::ffi::OsString],
@@ -721,7 +722,9 @@ fn manager_event_loop(
     let mut ref_count: usize = 0;
     let mut shutdown_deadline: Option<Instant> = None;
     let mut shutdown_sent = false;
+    let mut hard_deadline: Option<Instant> = None;
     let grace = Duration::from_millis(auto_shutdown_ms.max(1));
+    let hard_timeout = Duration::from_millis(HARD_SHUTDOWN_TIMEOUT_MS);
 
     loop {
         let timeout = match shutdown_deadline {
@@ -740,6 +743,7 @@ fn manager_event_loop(
                 );
                 shutdown_deadline = None;
                 shutdown_sent = false;
+                hard_deadline = None;
             }
             Ok(ManagerEvent::Dec(pid)) => {
                 ref_count = ref_count.saturating_sub(1);
@@ -765,12 +769,38 @@ fn manager_event_loop(
                     && Instant::now() >= deadline
                     && !shutdown_sent
                 {
+                    let mut sent = false;
                     if let Some(tx) = vm_input_tx.lock().unwrap().clone() {
-                        let _ = tx.send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()));
+                        if tx
+                            .send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()))
+                            .is_ok()
+                        {
+                            sent = true;
+                        } else {
+                            tracing::warn!("shutdown command failed to send");
+                        }
+                    } else {
+                        tracing::warn!("shutdown command deferred; vm input not ready");
                     }
-                    tracing::info!("shutdown command sent");
-                    shutdown_sent = true;
-                    shutdown_deadline = None;
+                    if sent {
+                        tracing::info!("shutdown command sent");
+                        shutdown_sent = true;
+                        shutdown_deadline = None;
+                        hard_deadline = Some(Instant::now() + hard_timeout);
+                    } else {
+                        shutdown_deadline = Some(Instant::now() + Duration::from_millis(500));
+                    }
+                }
+                if ref_count == 0
+                    && shutdown_sent
+                    && let Some(deadline) = hard_deadline
+                    && Instant::now() >= deadline
+                {
+                    tracing::warn!(
+                        timeout_ms = HARD_SHUTDOWN_TIMEOUT_MS,
+                        "force exiting: VM did not stop after shutdown timeout"
+                    );
+                    std::process::exit(1);
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
