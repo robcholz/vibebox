@@ -98,7 +98,7 @@ recreate the disk.
 
 **Mounts**
 
-- Your project is mounted read-write at `/usr/local/vibebox-mounts/<project-name>`, and the shell starts there.
+- Your project is mounted read-write at `~/<project-name>`, and the shell starts there.
 - If a `.git` directory exists, it is masked with a tmpfs mount inside the VM to discourage accidental edits from the
   guest.
 - Extra mounts come from `box.mounts` with the format `host:guest[:read-only|read-write]`.
