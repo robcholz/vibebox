@@ -7,25 +7,21 @@
 </p>
 <p align="center">Your ultrafast open source AI sandbox.</p>
 
-[![Crates.io][crates-badge]][crates-url]
-[![MIT licensed][mit-badge]][mit-url]
-[![Build Status][actions-badge]][actions-url]
-
-[crates-badge]: https://img.shields.io/crates/v/vibebox.svg
-
-[crates-url]: https://crates.io/crates/vibebox
-
-[mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
-
-[mit-url]: https://github.com/robcholz/vibebox/blob/main/LICENSE
-
-[actions-badge]: https://github.com/robcholz/vibebox/workflows/CI/badge.svg
-
-[actions-url]: https://github.com/robcholz/vibebox/actions?query=workflow%3ACI+branch%3Amain
+<p align="center">
+  <a href="https://crates.io/crates/vibebox">
+    <img alt="Crates.io" src="https://img.shields.io/crates/v/vibebox.svg">
+  </a>
+  <a href="https://github.com/robcholz/vibebox/blob/main/LICENSE">
+    <img alt="MIT licensed" src="https://img.shields.io/badge/license-MIT-blue.svg">
+  </a>
+  <a href="https://github.com/robcholz/vibebox/actions?query=workflow%3ACI+branch%3Amain">
+    <img alt="Build Status" src="https://github.com/robcholz/vibebox/workflows/CI/badge.svg">
+  </a>
+</p>
 
 <p align="center">
   <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
+  <a href="README.zh.md">简体中文</a>
 </p>
 
 [![OpenCode Terminal UI](docs/screenshot.png)](https://vibebox.robcholz.com)
