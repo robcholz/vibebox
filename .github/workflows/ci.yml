@@ -66,7 +66,7 @@ jobs:
     name: Test
     runs-on: macos-latest
     env:
-      RUST_BACKTRACE: "1"
+      RUST_BACKTRACE: "full"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -76,18 +76,23 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
-  e2e:
-    name: E2E
+  coverage:
+    name: Coverage
     runs-on: macos-latest
     needs: [fmt, clippy, build, test]
     env:
       RUST_BACKTRACE: "full"
-      RUST_TEST_NOCAPTURE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
-      - name: Run Mock VM E2E
-        run: cargo test --locked --features mock-vm --test e2e_vm_mock -- --nocapture
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --locked --features mock-vm --tests -- --nocapture
