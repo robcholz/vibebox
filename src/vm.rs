@@ -57,12 +57,6 @@ impl StatusFile {
     fn update(&self, message: &str) {
         let _ = fs::write(&self.path, message);
     }
-
-    fn clear(&self) {
-        if !self.cleared.swap(true, Ordering::SeqCst) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
 }
 
 impl Drop for StatusFile {
@@ -1119,7 +1113,6 @@ where
 
     if let Some(status) = status {
         status.update("vm booting... go vibecoder!");
-        status.clear();
     }
     tracing::info!("vm booting");
 
