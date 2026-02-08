@@ -67,7 +67,10 @@ fn default_auto_shutdown_ms() -> u64 {
 }
 
 fn default_mounts() -> Vec<String> {
-    Vec::new()
+    vec![
+        "~/.codex:~/.codex:read-write".into(),
+        "~/.claude:~/.claude:read-write".into(),
+    ]
 }
 
 fn default_disk_gb() -> u64 {
