@@ -20,6 +20,8 @@ jobs:
   fmt:
     name: Format
     runs-on: macos-latest
+    env:
+      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -34,6 +36,8 @@ jobs:
   clippy:
     name: Clippy
     runs-on: macos-latest
+    env:
+      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -48,6 +52,8 @@ jobs:
   build:
     name: Build
     runs-on: macos-latest
+    env:
+      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -60,6 +66,8 @@ jobs:
   test:
     name: Test
     runs-on: macos-latest
+    env:
+      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -73,6 +81,8 @@ jobs:
     name: E2E
     runs-on: macos-latest
     needs: [fmt, clippy, build, test]
+    env:
+      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust

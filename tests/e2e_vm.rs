@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -27,27 +28,39 @@ fn vm_boots_and_runs_command() {
 
     write_config(&project);
 
-    let child = Command::new(assert_cmd::cargo_bin!("vibebox-supervisor"))
+    let mut child = Command::new(assert_cmd::cargo_bin!("vibebox-supervisor"))
         .current_dir(&project)
         .env("HOME", &home)
         .env("XDG_CACHE_HOME", &cache_home)
         .env("VIBEBOX_INTERNAL", "1")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    if let Some(stdout) = child.stdout.take() {
+        spawn_prefix_reader("e2e_vm", "stdout", stdout);
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_prefix_reader("e2e_vm", "stderr", stderr);
+    }
     let _child_guard = ChildGuard::new(child);
 
+    log_line("e2e_vm", "waiting for vm manager socket");
     let socket_path = project.join(".vibebox").join("vm.sock");
     let _socket_guard = wait_for_socket(&socket_path, Duration::from_secs(30));
+    log_line("e2e_vm", "vm manager socket ready");
 
+    log_line("e2e_vm", "waiting for vm ipv4");
     let instance_path = project.join(".vibebox").join("instance.toml");
     let (ip, user) = wait_for_vm_ip(&instance_path, Duration::from_secs(180));
+    log_line("e2e_vm", &format!("vm ipv4={ip} user={user}"));
 
     let ssh_key = project.join(".vibebox").join("ssh_key");
     wait_for_file(&ssh_key, Duration::from_secs(30));
+    log_line("e2e_vm", "ssh key ready");
 
     let output = wait_for_ssh_command(&ssh_key, &user, &ip, Duration::from_secs(90));
+    print_output("e2e_vm", &output);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Linux"),
@@ -204,5 +217,41 @@ fn wait_for_ssh_command(
             panic!("ssh command failed and timed out: {}", stderr);
         }
         thread::sleep(Duration::from_millis(1000));
+    }
+}
+
+fn spawn_prefix_reader(
+    label: &'static str,
+    stream: &'static str,
+    reader: impl Read + Send + 'static,
+) {
+    thread::spawn(move || {
+        let buf = BufReader::new(reader);
+        for line in buf.lines() {
+            match line {
+                Ok(line) => {
+                    println!("[{}][{}] {}", label, stream, line);
+                }
+                Err(err) => {
+                    eprintln!("[{}][{}] read error: {}", label, stream, err);
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn log_line(prefix: &str, message: &str) {
+    println!("[{}] {}", prefix, message);
+}
+
+fn print_output(prefix: &str, output: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        println!("[{}] {}", prefix, line);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.lines() {
+        eprintln!("[{}] {}", prefix, line);
     }
 }
