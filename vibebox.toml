@@ -1,6 +1,7 @@
 [box]
 cpu_count = 2
 ram_mb = 2048
+disk_gb = 5
 mounts = [
     "~/.codex:~/.codex:read-write",
     "~/.claude:~/.claude:read-write",

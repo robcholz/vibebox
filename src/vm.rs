@@ -74,6 +74,7 @@ impl Drop for StatusFile {
 }
 const PROVISION_SCRIPT: &str = include_str!("provision.sh");
 const PROVISION_SCRIPT_NAME: &str = "provision.sh";
+const RESIZE_DISK_SCRIPT: &str = include_str!("resize_disk.sh");
 const DEFAULT_RAW_NAME: &str = "default.raw";
 const INSTANCE_RAW_NAME: &str = "instance.raw";
 const BASE_DISK_RAW_NAME: &str = "disk.raw";
@@ -166,6 +167,7 @@ fn expand_tilde_path(value: &str) -> PathBuf {
 pub struct VmArg {
     pub cpu_count: usize,
     pub ram_bytes: u64,
+    pub disk_bytes: u64,
     pub no_default_mounts: bool,
     pub mounts: Vec<String>,
 }
@@ -230,7 +232,15 @@ where
         std::slice::from_ref(&mise_directory_share),
         Some(&status_file),
     )?;
-    ensure_instance_disk(&instance_raw, &default_raw, Some(&status_file))?;
+    let _ = ensure_instance_disk(
+        &instance_raw,
+        &default_raw,
+        args.disk_bytes,
+        Some(&status_file),
+    )?;
+    let base_size = fs::metadata(&default_raw)?.len();
+    let instance_size = fs::metadata(&instance_raw)?.len();
+    let needs_resize = instance_size > base_size;
     let disk_path = instance_raw;
 
     let mut login_actions = Vec::new();
@@ -261,6 +271,11 @@ where
 
     for spec in &args.mounts {
         directory_shares.push(DirectoryShare::from_mount_spec(spec)?);
+    }
+
+    if needs_resize {
+        let resize_cmd = script_command_from_content("resize_disk", RESIZE_DISK_SCRIPT)?;
+        login_actions.push(Send(resize_cmd));
     }
 
     if let Some(motd_action) = motd_login_action(&directory_shares) {
@@ -559,19 +574,51 @@ fn ensure_default_image(
 fn ensure_instance_disk(
     instance_raw: &Path,
     template_raw: &Path,
+    target_bytes: u64,
     status: Option<&StatusFile>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     if instance_raw.exists() {
-        return Ok(());
+        let current_size = fs::metadata(instance_raw)?.len();
+        if current_size != target_bytes {
+            let current_gb = current_size as f64 / (1024.0 * 1024.0 * 1024.0);
+            let target_gb = target_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            tracing::warn!(
+                current_bytes = current_size,
+                target_bytes,
+                "instance disk size does not match config (current {:.2} GB, config {:.2} GB); disk_gb applies only on init. Run `vibebox reset` to recreate or set disk_gb to match; using existing disk.",
+                current_gb,
+                target_gb
+            );
+        }
+        return Ok(false);
     }
+
+    let template_size = fs::metadata(template_raw)?.len();
+    if target_bytes < template_size {
+        return Err(format!(
+            "Requested disk size {} bytes is smaller than base image size {} bytes",
+            target_bytes, template_size
+        )
+        .into());
+    }
+    let target_size = target_bytes;
+    let needs_resize = target_size > template_size;
 
     if let Some(status) = status {
         status.update("creating instance disk...");
     }
     tracing::info!(path = %template_raw.display(), "creating instance disk");
     std::fs::create_dir_all(instance_raw.parent().unwrap())?;
-    fs::copy(template_raw, instance_raw)?;
-    Ok(())
+    if target_size == template_size {
+        fs::copy(template_raw, instance_raw)?;
+        return Ok(needs_resize);
+    }
+
+    let mut dst = std::fs::File::create(instance_raw)?;
+    dst.set_len(target_size)?;
+    let mut src = std::fs::File::open(template_raw)?;
+    std::io::copy(&mut src, &mut dst)?;
+    Ok(needs_resize)
 }
 
 pub struct IoContext {

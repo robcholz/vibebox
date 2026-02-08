@@ -41,6 +41,7 @@ const INFO_LINE_COUNT: u16 = 5;
 pub struct VmInfo {
     pub max_memory_mb: u64,
     pub cpu_cores: usize,
+    pub max_disk_gb: f32,
     pub system_name: String,
     pub auto_shutdown_ms: u64,
 }
@@ -570,11 +571,11 @@ fn render_header(buffer: &mut Buffer, area: Rect, app: &AppState) {
             Span::styled(&app.vm_info.system_name, Style::default().fg(Color::Green)),
         ]),
         Line::from(vec![
-            Span::raw("CPU / Memory: "),
+            Span::raw("CPU / Memory / Disk: "),
             Span::styled(
                 format!(
-                    "{} cores / {} MB",
-                    app.vm_info.cpu_cores, app.vm_info.max_memory_mb
+                    "{} cores / {} MB / {} GB",
+                    app.vm_info.cpu_cores, app.vm_info.max_memory_mb, app.vm_info.max_disk_gb
                 ),
                 Style::default().fg(Color::Green),
             ),
