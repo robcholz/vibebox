@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert_cmd::cargo::cargo_bin_cmd;
+use assert_cmd::cargo::cargo_bin;
 use tempfile::TempDir;
 
 #[cfg(target_os = "macos")]
@@ -28,7 +28,7 @@ fn vm_boots_and_runs_command() {
 
     write_config(&project);
 
-    let child = cargo_bin_cmd!("vibebox-supervisor")
+    let child = Command::new(cargo_bin!("vibebox-supervisor"))
         .current_dir(&project)
         .env("HOME", &home)
         .env("XDG_CACHE_HOME", &cache_home)

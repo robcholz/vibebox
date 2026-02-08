@@ -48,8 +48,10 @@ fn build_mount_rows_includes_defaults_and_custom_mounts() {
     let _home_guard = EnvGuard::set("HOME", &home);
     let _cache_guard = EnvGuard::set("XDG_CACHE_HOME", &cache_home);
 
-    let mut box_cfg = config::BoxConfig::default();
-    box_cfg.mounts = vec!["data:~/data:read-only".to_string()];
+    let box_cfg = config::BoxConfig {
+        mounts: vec!["data:~/data:read-only".to_string()],
+        ..Default::default()
+    };
     let cfg = config::Config {
         box_cfg,
         supervisor: config::SupervisorConfig::default(),
