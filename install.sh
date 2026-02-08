@@ -38,8 +38,53 @@ require_cmd() {
   fi
 }
 
-require_cmd cargo "Install Rust (cargo) from https://rustup.rs and retry."
 require_cmd git "Install git and retry."
+
+ensure_cargo() {
+  if command -v cargo >/dev/null 2>&1; then
+    return 0
+  fi
+
+  print_message warning "Rust (cargo) is required but not found."
+  print_message info "You should review and approve the Rust installer before proceeding."
+  if [[ -t 0 ]]; then
+    read -r -p "Install Rust using rustup now? (y/N) " reply
+    case "${reply}" in
+      y|Y)
+        if command -v curl >/dev/null 2>&1; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        elif command -v wget >/dev/null 2>&1; then
+          wget -qO- https://sh.rustup.rs | sh -s -- -y
+        else
+          print_message error "Missing required command: curl or wget"
+          print_message info "Install Rust manually from https://rustup.rs and retry."
+          exit 1
+        fi
+        # shellcheck source=/dev/null
+        if [[ -f "$HOME/.cargo/env" ]]; then
+          # shellcheck disable=SC1090
+          source "$HOME/.cargo/env"
+        fi
+      ;;
+      *)
+        print_message info "Install Rust manually from https://rustup.rs and retry."
+        exit 1
+      ;;
+    esac
+  else
+    print_message error "Non-interactive shell: cannot prompt to install Rust."
+    print_message info "Install Rust manually from https://rustup.rs and retry."
+    exit 1
+  fi
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    print_message error "Cargo still not available after installation."
+    print_message info "Open a new shell or run: source \"$HOME/.cargo/env\""
+    exit 1
+  fi
+}
+
+ensure_cargo
 
 CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
 INSTALL_DIR="$CARGO_HOME/bin"
