@@ -512,44 +512,6 @@ enum ManagerEvent {
     VmExited(Option<String>),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{sync::mpsc, time::Duration};
-
-    #[test]
-    fn manager_powers_off_after_grace_when_no_refs() {
-        let _temp = tempfile::Builder::new()
-            .prefix("vb")
-            .tempdir_in("/tmp")
-            .expect("tempdir");
-
-        let (event_tx, event_rx) = mpsc::channel::<ManagerEvent>();
-        let (vm_tx, vm_rx) = mpsc::channel::<VmInput>();
-        let vm_input_tx = Arc::new(Mutex::new(Some(vm_tx)));
-
-        let manager_thread = thread::spawn(move || {
-            manager_event_loop(event_rx, vm_input_tx, 50).expect("event loop");
-        });
-
-        event_tx.send(ManagerEvent::Inc(None)).unwrap();
-        assert!(vm_rx.recv_timeout(Duration::from_millis(100)).is_err());
-
-        event_tx.send(ManagerEvent::Dec(None)).unwrap();
-        let msg = vm_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("poweroff");
-        match msg {
-            VmInput::Bytes(data) => {
-                assert_eq!(data, b"systemctl poweroff\n");
-            }
-            _ => panic!("unexpected vm input"),
-        }
-        let _ = event_tx.send(ManagerEvent::VmExited(None));
-        let _ = manager_thread.join();
-    }
-}
-
 struct ManagerOptions {
     ensure_signed: bool,
     detach: bool,
@@ -787,4 +749,42 @@ fn manager_event_loop(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn manager_powers_off_after_grace_when_no_refs() {
+        let _temp = tempfile::Builder::new()
+            .prefix("vb")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+
+        let (event_tx, event_rx) = mpsc::channel::<ManagerEvent>();
+        let (vm_tx, vm_rx) = mpsc::channel::<VmInput>();
+        let vm_input_tx = Arc::new(Mutex::new(Some(vm_tx)));
+
+        let manager_thread = thread::spawn(move || {
+            manager_event_loop(event_rx, vm_input_tx, 50).expect("event loop");
+        });
+
+        event_tx.send(ManagerEvent::Inc(None)).unwrap();
+        assert!(vm_rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+        event_tx.send(ManagerEvent::Dec(None)).unwrap();
+        let msg = vm_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("poweroff");
+        match msg {
+            VmInput::Bytes(data) => {
+                assert_eq!(data, b"systemctl poweroff\n");
+            }
+            _ => panic!("unexpected vm input"),
+        }
+        let _ = event_tx.send(ManagerEvent::VmExited(None));
+        let _ = manager_thread.join();
+    }
 }
