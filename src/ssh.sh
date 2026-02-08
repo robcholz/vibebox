@@ -88,16 +88,22 @@ fi
 
 # Install Mise
 MISE_BIN="${USER_HOME}/.local/bin/mise"
-if [ ! -x "$MISE_BIN" ] && ! command -v mise >/dev/null 2>&1; then
-  curl https://mise.run | HOME="$USER_HOME" sh
-fi
-echo 'eval "$(~/.local/bin/mise activate bash)"' >> "${USER_HOME}/.bashrc"
+mise_warn() { echo "[mise] $*" >&2; }
+mise_ok() { command -v mise >/dev/null 2>&1 || [ -x "$MISE_BIN" ]; }
+mise_install() {
+  if [ ! -x "$MISE_BIN" ] && ! command -v mise >/dev/null 2>&1; then
+    if ! curl https://mise.run | HOME="$USER_HOME" sh; then
+      mise_warn "mise install script failed (continuing)"
+      return 0
+    fi
+  fi
+  echo 'eval "$(~/.local/bin/mise activate bash)"' >> "${USER_HOME}/.bashrc"
 
-export PATH="${USER_HOME}/.local/bin:/usr/local/bin:$PATH"
+  export PATH="${USER_HOME}/.local/bin:/usr/local/bin:$PATH"
 
-mkdir -p "${USER_HOME}/.config/mise"
+  mkdir -p "${USER_HOME}/.config/mise"
 
-cat > "${USER_HOME}/.config/mise/config.toml" <<MISE
+  cat > "${USER_HOME}/.config/mise/config.toml" <<MISE
     [settings]
     # Always use the venv created by uv, if available in directory
     python.uv_venv_auto = true
@@ -111,12 +117,21 @@ cat > "${USER_HOME}/.config/mise/config.toml" <<MISE
     "npm:@anthropic-ai/claude-code" = "latest"
 MISE
 
-touch "${USER_HOME}/.config/mise/mise.lock"
-if [ -x "$MISE_BIN" ]; then
-  HOME="$USER_HOME" "$MISE_BIN" install
-else
-  HOME="$USER_HOME" mise install
-fi
+  touch "${USER_HOME}/.config/mise/mise.lock"
+  if [ -x "$MISE_BIN" ]; then
+    if ! HOME="$USER_HOME" "$MISE_BIN" install; then
+      mise_warn "mise install failed (continuing)"
+      return 0
+    fi
+  else
+    if ! HOME="$USER_HOME" mise install; then
+      mise_warn "mise install failed (continuing)"
+      return 0
+    fi
+  fi
+}
+
+mise_install || true
 
 # 3) start ssh (don't swallow failures)
 # If ssh is already active, don't force start/restart.
@@ -183,6 +198,12 @@ if ! listens_ok; then
   dump_diag
   exit 1
 fi
+
+ip a
+ip link
+curl -s https://api.ipify.org ; echo
+
+cat /etc/machine-id
 
 echo VIBEBOX_SSH_READY
 echo "VIBEBOX_IPV4=$ip"
