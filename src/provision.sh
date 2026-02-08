@@ -14,6 +14,7 @@ apt-get install -y --no-install-recommends      \
         curl                                    \
         git                                     \
         ripgrep                                 \
+        cloud-guest-utils                       \
         openssh-server                          \
         sudo
 

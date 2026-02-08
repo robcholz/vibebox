@@ -63,6 +63,7 @@ fn main() -> Result<()> {
         let args = vm::VmArg {
             cpu_count: config.box_cfg.cpu_count,
             ram_bytes: config.box_cfg.ram_mb.saturating_mul(1024 * 1024),
+            disk_bytes: config.box_cfg.disk_gb.saturating_mul(1024 * 1024 * 1024),
             no_default_mounts: false,
             mounts: config.box_cfg.mounts.clone(),
         };
@@ -80,6 +81,7 @@ fn main() -> Result<()> {
     let vm_args = vm::VmArg {
         cpu_count: config.box_cfg.cpu_count,
         ram_bytes: config.box_cfg.ram_mb.saturating_mul(1024 * 1024),
+        disk_bytes: config.box_cfg.disk_gb.saturating_mul(1024 * 1024 * 1024),
         no_default_mounts: false,
         mounts: config.box_cfg.mounts.clone(),
     };
@@ -88,6 +90,7 @@ fn main() -> Result<()> {
     let vm_info = VmInfo {
         max_memory_mb: vm_args.ram_bytes / (1024 * 1024),
         cpu_cores: vm_args.cpu_count,
+        max_disk_gb: (vm_args.disk_bytes as f32) / 1024.0 / 1024.0 / 1024.0,
         system_name: "Debian".to_string(), // TODO: read system name from the VM.
         auto_shutdown_ms,
     };

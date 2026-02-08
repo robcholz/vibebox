@@ -13,6 +13,7 @@ pub const CONFIG_PATH_ENV: &str = "VIBEBOX_CONFIG_PATH";
 const DEFAULT_CPU_COUNT: usize = 2;
 const DEFAULT_RAM_MB: u64 = 2048;
 const DEFAULT_AUTO_SHUTDOWN_MS: u64 = 20000;
+const DEFAULT_DISK_GB: u64 = 5;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -25,6 +26,7 @@ pub struct Config {
 pub struct BoxConfig {
     pub cpu_count: usize,
     pub ram_mb: u64,
+    pub disk_gb: u64,
     pub mounts: Vec<String>,
 }
 
@@ -33,6 +35,7 @@ impl Default for BoxConfig {
         Self {
             cpu_count: default_cpu_count(),
             ram_mb: default_ram_mb(),
+            disk_gb: default_disk_gb(),
             mounts: default_mounts(),
         }
     }
@@ -65,6 +68,10 @@ fn default_auto_shutdown_ms() -> u64 {
 
 fn default_mounts() -> Vec<String> {
     Vec::new()
+}
+
+fn default_disk_gb() -> u64 {
+    DEFAULT_DISK_GB
 }
 
 pub fn config_path(project_root: &Path) -> PathBuf {
@@ -102,7 +109,7 @@ pub fn load_config_with_path(project_root: &Path, override_path: Option<&Path>) 
     tracing::debug!(path = %path.display(), bytes = raw.len(), "loaded vibebox config");
     if trimmed.is_empty() {
         die(&format!(
-            "config file ({}) is empty. Required fields: [box].cpu_count (integer), [box].ram_mb (integer), [box].mounts (array of strings), [supervisor].auto_shutdown_ms (integer)",
+            "config file ({}) is empty. Required fields: [box].cpu_count (integer), [box].ram_mb (integer), [box].disk_gb (integer), [box].mounts (array of strings), [supervisor].auto_shutdown_ms (integer)",
             path.display()
         ));
     }
@@ -193,6 +200,7 @@ fn validate_schema(value: &toml::Value) -> Vec<String> {
             Some(table) => {
                 validate_int(table, "cpu_count", "[box].cpu_count (integer)", &mut errors);
                 validate_int(table, "ram_mb", "[box].ram_mb (integer)", &mut errors);
+                validate_int(table, "disk_gb", "[box].disk_gb (integer)", &mut errors);
                 validate_string_array(
                     table,
                     "mounts",
@@ -258,6 +266,9 @@ fn validate_or_exit(config: &Config) {
     }
     if config.box_cfg.ram_mb == 0 {
         die("box.ram_mb must be >= 1");
+    }
+    if config.box_cfg.disk_gb == 0 {
+        die("box.disk_gb must be >= 1");
     }
     if config.supervisor.auto_shutdown_ms == 0 {
         die("supervisor.auto_shutdown_ms must be >= 1");
