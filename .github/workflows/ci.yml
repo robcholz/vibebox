@@ -2,7 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - "**"
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - "install.sh"
   pull_request:
 
 concurrency:
