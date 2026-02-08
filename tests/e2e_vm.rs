@@ -17,6 +17,10 @@ fn vm_boots_and_runs_command() {
         eprintln!("skipping: set VIBEBOX_E2E_VM=1 to run this test");
         return;
     }
+    if !virtualization_available() {
+        eprintln!("[e2e_vm] skipping: virtualization not available on this hardware");
+        return;
+    }
 
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("home");
@@ -253,5 +257,22 @@ fn print_output(prefix: &str, output: &std::process::Output) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     for line in stderr.lines() {
         eprintln!("[{}] {}", prefix, line);
+    }
+}
+
+fn virtualization_available() -> bool {
+    let output = Command::new("sysctl")
+        .args(["-n", "kern.hv_support"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let value = String::from_utf8_lossy(&output.stdout);
+            match value.trim() {
+                "1" => true,
+                "0" => false,
+                _ => true,
+            }
+        }
+        _ => true,
     }
 }

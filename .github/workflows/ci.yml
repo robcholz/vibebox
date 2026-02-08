@@ -81,14 +81,13 @@ jobs:
     runs-on: macos-latest
     needs: [fmt, clippy, build, test]
     env:
-      RUST_BACKTRACE: "1"
+      RUST_BACKTRACE: "full"
+      RUST_TEST_NOCAPTURE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
-      - name: Run VM E2E
-        env:
-          VIBEBOX_E2E_VM: "1"
-        run: cargo test --locked --test e2e_vm -- --ignored
+      - name: Run Mock VM E2E
+        run: cargo test --locked --features mock-vm --test e2e_vm_mock -- --nocapture
