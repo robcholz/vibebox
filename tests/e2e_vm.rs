@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert_cmd::cargo::cargo_bin;
 use tempfile::TempDir;
 
 #[cfg(target_os = "macos")]
@@ -28,7 +27,7 @@ fn vm_boots_and_runs_command() {
 
     write_config(&project);
 
-    let child = Command::new(cargo_bin!("vibebox-supervisor"))
+    let child = Command::new(assert_cmd::cargo_bin!("vibebox-supervisor"))
         .current_dir(&project)
         .env("HOME", &home)
         .env("XDG_CACHE_HOME", &cache_home)
@@ -123,22 +122,22 @@ fn wait_for_socket(path: &Path, timeout: Duration) -> SocketGuard {
 fn wait_for_vm_ip(instance_path: &Path, timeout: Duration) -> (String, String) {
     let start = Instant::now();
     loop {
-        if let Ok(raw) = fs::read_to_string(instance_path) {
-            if let Ok(value) = toml::from_str::<toml::Value>(&raw) {
-                let ip = value
-                    .get("vm_ipv4")
+        if let Ok(raw) = fs::read_to_string(instance_path)
+            && let Ok(value) = toml::from_str::<toml::Value>(&raw)
+        {
+            let ip = value
+                .get("vm_ipv4")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(ip) = ip {
+                let user = value
+                    .get("ssh_user")
                     .and_then(|v| v.as_str())
                     .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-                if let Some(ip) = ip {
-                    let user = value
-                        .get("ssh_user")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "vibecoder".to_string());
-                    return (ip, user);
-                }
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "vibecoder".to_string());
+                return (ip, user);
             }
         }
         if start.elapsed() > timeout {
