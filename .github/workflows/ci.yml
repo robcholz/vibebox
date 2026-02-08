@@ -10,7 +10,6 @@ on:
       - "README.zh.md"
       - "docs/**"
       - "install"
-  pull_request:
 
 concurrency:
   group: ci-${{ github.ref }}
