@@ -46,7 +46,7 @@ fn default_mounts(cwd: &Path) -> Result<Vec<tui::MountListRow>, Box<dyn Error + 
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("project");
-    let project_guest = format!("/root/{project_name}");
+    let project_guest = format!("~/{project_name}");
     let project_host = display_path(cwd);
     let mut rows = vec![tui::MountListRow {
         host: project_host,

@@ -394,6 +394,7 @@ fn ssh_port_open(ip: &str) -> bool {
 pub(crate) fn build_ssh_login_actions(
     config: &Arc<Mutex<InstanceConfig>>,
     project_name: &str,
+    project_guest_dir: &str,
     guest_dir: &str,
     key_name: &str,
     home_links_script: &str,
@@ -409,6 +410,7 @@ pub(crate) fn build_ssh_login_actions(
         .replace("__SSH_USER__", &ssh_user)
         .replace("__SUDO_PASSWORD__", &sudo_password)
         .replace("__PROJECT_NAME__", project_name)
+        .replace("__PROJECT_GUEST_DIR__", project_guest_dir)
         .replace("__KEY_PATH__", &key_path)
         .replace("__VIBEBOX_SHELL_SCRIPT__", &commands::render_shell_script())
         .replace("__VIBEBOX_HOME_LINKS__", home_links_script);

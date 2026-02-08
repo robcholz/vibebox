@@ -25,7 +25,7 @@ use crate::{
     session_manager::{
         GLOBAL_DIR_NAME, INSTANCE_FILENAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME,
     },
-    vm::{self, DirectoryShare, LoginAction, VmInput},
+    vm::{self, DirectoryShare, LoginAction, PROJECT_GUEST_BASE, VmInput},
 };
 
 const VM_MANAGER_LOCK_NAME: &str = "vm.lock";
@@ -200,6 +200,30 @@ fn cleanup_stale_manager(instance_dir: &Path) {
     let _ = fs::remove_file(&pid_path);
 }
 
+fn inject_project_mount(
+    mounts: &mut Vec<String>,
+    project_root: &Path,
+    ssh_user: &str,
+    project_name: &str,
+) {
+    let guest_tilde = format!("~/{project_name}");
+    let guest_home = format!("/home/{ssh_user}/{project_name}");
+    let guest_base = format!("{PROJECT_GUEST_BASE}/{project_name}");
+    let already_mapped = mounts.iter().any(|spec| {
+        let parts: Vec<&str> = spec.split(':').collect();
+        if parts.len() < 2 {
+            return false;
+        }
+        let guest = parts[1];
+        guest == guest_tilde || guest == guest_home || guest == guest_base
+    });
+    if already_mapped {
+        return;
+    }
+    let host = project_root.display();
+    mounts.insert(0, format!("{host}:{guest_tilde}:read-write"));
+}
+
 fn is_socket_path(path: &Path) -> bool {
     fs::metadata(path)
         .map(|meta| meta.file_type().is_socket())
@@ -252,7 +276,7 @@ fn rewrite_mount_spec(spec: &str, ssh_user: &str) -> (String, Option<HomeLink>) 
         return (spec.to_string(), None);
     }
 
-    let root_base = "/usr/local/vibebox-mounts";
+    let root_base = PROJECT_GUEST_BASE;
     let root_path = if rel.is_empty() {
         root_base.to_string()
     } else {
@@ -563,7 +587,7 @@ impl VmExecutor for RealVmExecutor {
 
 fn run_manager_with(
     project_root: &Path,
-    args: vm::VmArg,
+    mut args: vm::VmArg,
     auto_shutdown_ms: u64,
     executor: &dyn VmExecutor,
     options: ManagerOptions,
@@ -602,8 +626,12 @@ fn run_manager_with(
         .lock()
         .map(|cfg| cfg.ssh_user_display())
         .unwrap_or_else(|_| DEFAULT_SSH_USER.to_string());
+    if !args.no_default_mounts {
+        inject_project_mount(&mut args.mounts, project_root, &ssh_user, &project_name);
+    }
     let (args, home_links_script) = prepare_mounts_and_links(args, &ssh_user);
 
+    let project_guest_dir = format!("{PROJECT_GUEST_BASE}/{project_name}");
     let ssh_guest_dir = format!("/root/{}", GLOBAL_DIR_NAME);
     let extra_shares = vec![DirectoryShare::new(
         instance_dir.clone(),
@@ -613,6 +641,7 @@ fn run_manager_with(
     let extra_login_actions = build_ssh_login_actions(
         &config,
         &project_name,
+        &project_guest_dir,
         ssh_guest_dir.as_str(),
         "ssh_key",
         &home_links_script,

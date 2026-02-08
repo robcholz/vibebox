@@ -3,6 +3,7 @@ set -eu
 
 SSH_USER="__SSH_USER__"
 PROJECT_NAME="__PROJECT_NAME__"
+PROJECT_GUEST_DIR="__PROJECT_GUEST_DIR__"
 KEY_PATH="__KEY_PATH__"
 
 diag() { echo "[vibebox][diag] $*" >&2; }
@@ -49,7 +50,7 @@ dump_diag() {
 }
 
 # 1) tmpfs mount
-TARGET="/root/${PROJECT_NAME}/.vibebox"
+TARGET="${PROJECT_GUEST_DIR}/.vibebox"
 if [ -d "$TARGET" ] && ! mountpoint -q "$TARGET"; then
   mount -t tmpfs tmpfs "$TARGET"
 fi
@@ -77,6 +78,21 @@ cat > /etc/profile.d/vibebox.sh <<'VIBEBOX_SHELL_EOF'
 __VIBEBOX_SHELL_SCRIPT__
 VIBEBOX_SHELL_EOF
 chmod 644 /etc/profile.d/vibebox.sh
+
+# Auto-cd into project for interactive shells
+cat > /etc/profile.d/vibebox-project.sh <<'VIBEBOX_PROJECT_EOF'
+case "$-" in
+  *i*)
+    project_home="${HOME}/__PROJECT_NAME__"
+    if [ "$USER" = "__SSH_USER__" ] && [ -d "$project_home" ]; then
+      cd "$project_home"
+    elif [ "$USER" = "__SSH_USER__" ] && [ -d "__PROJECT_GUEST_DIR__" ]; then
+      cd "__PROJECT_GUEST_DIR__"
+    fi
+    ;;
+esac
+VIBEBOX_PROJECT_EOF
+chmod 644 /etc/profile.d/vibebox-project.sh
 
 if ! grep -q "vibebox-aliases" "${USER_HOME}/.bashrc" 2>/dev/null; then
   {

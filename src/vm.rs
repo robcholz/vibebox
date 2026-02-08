@@ -32,6 +32,7 @@ const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/
 const DEBIAN_COMPRESSED_SHA: &str = "6ab9be9e6834adc975268367f2f0235251671184345c34ee13031749fdfbf66fe4c3aafd949a2d98550426090e9ac645e79009c51eb0eefc984c15786570bb38";
 const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 280901576;
 const SHARED_DIRECTORIES_TAG: &str = "shared";
+pub const PROJECT_GUEST_BASE: &str = "/usr/local/vibebox-mounts";
 
 const BYTES_PER_MB: u64 = 1024 * 1024;
 const DEFAULT_CPU_COUNT: usize = 2;
@@ -247,22 +248,14 @@ where
     let mut directory_shares = Vec::new();
 
     if !args.no_default_mounts {
-        login_actions.push(Send(format!("cd {project_name}")));
+        let project_guest_dir = PathBuf::from(PROJECT_GUEST_BASE).join(project_name);
+        login_actions.push(Send(format!("cd {}", project_guest_dir.display())));
 
         // discourage read/write of .git folder from within the VM. note that this isn't secure, since the VM runs as root and could unmount this.
         // I couldn't find an alternative way to do this --- the MacOS sandbox doesn't apply to the Apple Virtualization system
         if project_root.join(".git").exists() {
             login_actions.push(Send(r"mount -t tmpfs tmpfs .git/".into()));
         }
-
-        directory_shares.push(
-            DirectoryShare::new(
-                project_root,
-                PathBuf::from("/root/").join(project_name),
-                false,
-            )
-            .expect("Project directory must exist"),
-        );
 
         directory_shares.push(mise_directory_share);
     }
