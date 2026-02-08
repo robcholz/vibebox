@@ -7,7 +7,7 @@ on:
     paths-ignore:
       - "README.md"
       - "docs/**"
-      - "install.sh"
+      - "install"
   pull_request:
 
 concurrency:
