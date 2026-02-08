@@ -21,6 +21,7 @@ use crate::{
 };
 
 const SSH_KEY_NAME: &str = "ssh_key";
+#[cfg_attr(feature = "mock-vm", allow(dead_code))]
 pub(crate) const VM_ROOT_LOG_NAME: &str = "vm_root.log";
 pub(crate) const STATUS_FILE_NAME: &str = "status.txt";
 pub(crate) const DEFAULT_SSH_USER: &str = "vibecoder";
@@ -217,6 +218,7 @@ fn generate_password() -> String {
     Uuid::now_v7().simple().to_string()
 }
 
+#[cfg_attr(feature = "mock-vm", allow(dead_code))]
 pub(crate) fn extract_ipv4(line: &str) -> Option<String> {
     let mut current = String::new();
     let mut best: Option<String> = None;
@@ -383,6 +385,7 @@ fn run_ssh_session(
     Ok(())
 }
 
+#[cfg_attr(feature = "mock-vm", allow(dead_code))]
 fn is_ipv4_candidate(candidate: &str) -> bool {
     let parts: Vec<&str> = candidate.split('.').collect();
     if parts.len() != 4 {

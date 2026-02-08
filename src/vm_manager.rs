@@ -103,17 +103,37 @@ pub fn run_manager(
     let project_root = env::current_dir()?;
     tracing::info!(root = %project_root.display(), "vm manager starting");
     let _pid_guard = ensure_pid_file(&project_root)?;
-    run_manager_with(
-        &project_root,
-        args,
-        auto_shutdown_ms,
-        &RealVmExecutor,
-        ManagerOptions {
-            ensure_signed: true,
-            detach: true,
-            prepare_vm: true,
-        },
-    )
+    #[cfg(feature = "mock-vm")]
+    tracing::info!("vm manager using mock executor");
+    let executor: &dyn VmExecutor = {
+        #[cfg(feature = "mock-vm")]
+        {
+            &MockVmExecutor
+        }
+        #[cfg(not(feature = "mock-vm"))]
+        {
+            &RealVmExecutor
+        }
+    };
+    let options = {
+        #[cfg(feature = "mock-vm")]
+        {
+            ManagerOptions {
+                ensure_signed: false,
+                detach: true,
+                prepare_vm: false,
+            }
+        }
+        #[cfg(not(feature = "mock-vm"))]
+        {
+            ManagerOptions {
+                ensure_signed: true,
+                detach: true,
+                prepare_vm: true,
+            }
+        }
+    };
+    run_manager_with(&project_root, args, auto_shutdown_ms, executor, options)
 }
 
 fn spawn_manager_process(
@@ -468,6 +488,7 @@ fn read_client_pid(stream: &UnixStream) -> Option<u32> {
     }
 }
 
+#[cfg_attr(feature = "mock-vm", allow(dead_code))]
 fn spawn_manager_io(
     config: Arc<Mutex<InstanceConfig>>,
     instance_dir: PathBuf,
@@ -555,6 +576,7 @@ trait VmExecutor {
     ) -> Result<(), Box<dyn std::error::Error>>;
 }
 
+#[cfg_attr(feature = "mock-vm", allow(dead_code))]
 struct RealVmExecutor;
 
 impl VmExecutor for RealVmExecutor {
@@ -583,6 +605,39 @@ impl VmExecutor for RealVmExecutor {
             extra_login_actions,
             extra_shares,
         )
+    }
+}
+
+#[cfg(feature = "mock-vm")]
+struct MockVmExecutor;
+
+#[cfg(feature = "mock-vm")]
+impl VmExecutor for MockVmExecutor {
+    fn run_vm(
+        &self,
+        _args: vm::VmArg,
+        _extra_login_actions: Vec<LoginAction>,
+        _extra_shares: Vec<DirectoryShare>,
+        _config: Arc<Mutex<InstanceConfig>>,
+        _instance_dir: PathBuf,
+        vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (tx, rx) = mpsc::channel::<VmInput>();
+        *vm_input_tx.lock().unwrap() = Some(tx);
+        tracing::info!("mock vm executor running");
+        while let Ok(input) = rx.recv() {
+            match input {
+                VmInput::Shutdown => break,
+                VmInput::Bytes(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    if text.contains("systemctl poweroff") {
+                        break;
+                    }
+                }
+            }
+        }
+        tracing::info!("mock vm executor exiting");
+        Ok(())
     }
 }
 

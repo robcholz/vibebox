@@ -10,7 +10,6 @@ on:
       - "README.zh.md"
       - "docs/**"
       - "install"
-  pull_request:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -20,6 +19,8 @@ jobs:
   fmt:
     name: Format
     runs-on: macos-latest
+    env:
+      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -34,6 +35,8 @@ jobs:
   clippy:
     name: Clippy
     runs-on: macos-latest
+    env:
+      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -48,6 +51,8 @@ jobs:
   build:
     name: Build
     runs-on: macos-latest
+    env:
+      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -60,6 +65,8 @@ jobs:
   test:
     name: Test
     runs-on: macos-latest
+    env:
+      RUST_BACKTRACE: "full"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -68,3 +75,24 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --locked
+
+  coverage:
+    name: Coverage
+    runs-on: macos-latest
+    needs: [fmt, clippy, build, test]
+    env:
+      RUST_BACKTRACE: "full"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --locked --features mock-vm --tests -- --nocapture

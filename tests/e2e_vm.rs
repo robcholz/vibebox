@@ -1,0 +1,278 @@
+use std::{
+    fs,
+    io::{BufRead, BufReader, Read},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+use tempfile::TempDir;
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn vm_boots_and_runs_command() {
+    if std::env::var("VIBEBOX_E2E_VM").as_deref() != Ok("1") {
+        eprintln!("skipping: set VIBEBOX_E2E_VM=1 to run this test");
+        return;
+    }
+    if !virtualization_available() {
+        eprintln!("[e2e_vm] skipping: virtualization not available on this hardware");
+        return;
+    }
+
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let cache_home = temp.path().join("cache");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cache_home).unwrap();
+    fs::create_dir_all(&project).unwrap();
+
+    write_config(&project);
+
+    let mut child = Command::new(assert_cmd::cargo_bin!("vibebox-supervisor"))
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("XDG_CACHE_HOME", &cache_home)
+        .env("VIBEBOX_INTERNAL", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(stdout) = child.stdout.take() {
+        spawn_prefix_reader("e2e_vm", "stdout", stdout);
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_prefix_reader("e2e_vm", "stderr", stderr);
+    }
+    let _child_guard = ChildGuard::new(child);
+
+    log_line("e2e_vm", "waiting for vm manager socket");
+    let socket_path = project.join(".vibebox").join("vm.sock");
+    let _socket_guard = wait_for_socket(&socket_path, Duration::from_secs(30));
+    log_line("e2e_vm", "vm manager socket ready");
+
+    log_line("e2e_vm", "waiting for vm ipv4");
+    let instance_path = project.join(".vibebox").join("instance.toml");
+    let (ip, user) = wait_for_vm_ip(&instance_path, Duration::from_secs(180));
+    log_line("e2e_vm", &format!("vm ipv4={ip} user={user}"));
+
+    let ssh_key = project.join(".vibebox").join("ssh_key");
+    wait_for_file(&ssh_key, Duration::from_secs(30));
+    log_line("e2e_vm", "ssh key ready");
+
+    let output = wait_for_ssh_command(&ssh_key, &user, &ip, Duration::from_secs(90));
+    print_output("e2e_vm", &output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Linux"),
+        "expected ssh command output to contain 'Linux', got: {}",
+        stdout
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+#[ignore]
+fn vm_boots_and_runs_command() {
+    eprintln!("skipping: vm e2e test requires macOS virtualization");
+}
+
+struct ChildGuard {
+    child: Option<Child>,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+struct SocketGuard {
+    _path: PathBuf,
+    _stream: std::os::unix::net::UnixStream,
+}
+
+fn write_config(project: &Path) {
+    let config = r#"[box]
+cpu_count = 2
+ram_mb = 2048
+disk_gb = 5
+mounts = []
+
+[supervisor]
+auto_shutdown_ms = 120000
+"#;
+    fs::write(project.join("vibebox.toml"), config).unwrap();
+}
+
+fn wait_for_socket(path: &Path, timeout: Duration) -> SocketGuard {
+    let start = Instant::now();
+    loop {
+        if let Ok(stream) = std::os::unix::net::UnixStream::connect(path) {
+            return SocketGuard {
+                _path: path.to_path_buf(),
+                _stream: stream,
+            };
+        }
+        if start.elapsed() > timeout {
+            panic!(
+                "timed out waiting for vm manager socket at {}",
+                path.display()
+            );
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn wait_for_vm_ip(instance_path: &Path, timeout: Duration) -> (String, String) {
+    let start = Instant::now();
+    loop {
+        if let Ok(raw) = fs::read_to_string(instance_path)
+            && let Ok(value) = toml::from_str::<toml::Value>(&raw)
+        {
+            let ip = value
+                .get("vm_ipv4")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(ip) = ip {
+                let user = value
+                    .get("ssh_user")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "vibecoder".to_string());
+                return (ip, user);
+            }
+        }
+        if start.elapsed() > timeout {
+            panic!(
+                "timed out waiting for vm_ipv4 in {}",
+                instance_path.display()
+            );
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn wait_for_file(path: &Path, timeout: Duration) {
+    let start = Instant::now();
+    loop {
+        if path.exists() {
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!("timed out waiting for file {}", path.display());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn wait_for_ssh_command(
+    ssh_key: &Path,
+    user: &str,
+    ip: &str,
+    timeout: Duration,
+) -> std::process::Output {
+    let start = Instant::now();
+    loop {
+        let output = Command::new("ssh")
+            .args([
+                "-i",
+                ssh_key.to_str().unwrap_or(".vibebox/ssh_key"),
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "GlobalKnownHostsFile=/dev/null",
+                "-o",
+                "PasswordAuthentication=no",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "LogLevel=ERROR",
+                "-o",
+                "ConnectTimeout=5",
+                &format!("{user}@{ip}"),
+                "uname -s",
+            ])
+            .output()
+            .unwrap();
+        if output.status.success() {
+            return output;
+        }
+        if start.elapsed() > timeout {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!("ssh command failed and timed out: {}", stderr);
+        }
+        thread::sleep(Duration::from_millis(1000));
+    }
+}
+
+fn spawn_prefix_reader(
+    label: &'static str,
+    stream: &'static str,
+    reader: impl Read + Send + 'static,
+) {
+    thread::spawn(move || {
+        let buf = BufReader::new(reader);
+        for line in buf.lines() {
+            match line {
+                Ok(line) => {
+                    println!("[{}][{}] {}", label, stream, line);
+                }
+                Err(err) => {
+                    eprintln!("[{}][{}] read error: {}", label, stream, err);
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn log_line(prefix: &str, message: &str) {
+    println!("[{}] {}", prefix, message);
+}
+
+fn print_output(prefix: &str, output: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        println!("[{}] {}", prefix, line);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.lines() {
+        eprintln!("[{}] {}", prefix, line);
+    }
+}
+
+fn virtualization_available() -> bool {
+    let output = Command::new("sysctl")
+        .args(["-n", "kern.hv_support"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let value = String::from_utf8_lossy(&output.stdout);
+            match value.trim() {
+                "1" => true,
+                "0" => false,
+                _ => true,
+            }
+        }
+        _ => true,
+    }
+}
