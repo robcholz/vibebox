@@ -6,7 +6,7 @@ permissions:
 on:
   push:
     tags:
-      - "v*.*.*-*"
+      - "v*.*.*"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -24,8 +24,8 @@ jobs:
       - name: Validate release tag format
         run: |
           TAG="${GITHUB_REF_NAME}"
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z]+$ ]]; then
-            echo "Tag '$TAG' does not match required format vX.X.X-word"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z]+)?$ ]]; then
+            echo "Tag '$TAG' does not match required format vX.X.X or vX.X.X-word"
             exit 1
           fi
 
