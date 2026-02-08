@@ -54,3 +54,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: cargo build
         run: cargo build --locked
+
+  test:
+    name: Test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --locked
