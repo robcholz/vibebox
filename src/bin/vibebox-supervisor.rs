@@ -47,7 +47,7 @@ fn main() -> Result<()> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
     let stderr_is_tty = std::io::stderr().is_terminal();
     let ansi = stderr_is_tty && env::var("VIBEBOX_LOG_NO_COLOR").is_err();
     if stderr_is_tty {

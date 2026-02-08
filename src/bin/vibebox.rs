@@ -354,7 +354,7 @@ fn format_last_active(value: Option<&str>) -> String {
 type StderrHandle = reload::Handle<LevelFilter, Registry>;
 
 fn init_tracing(cwd: &Path) -> Option<StderrHandle> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
     let file_filter = filter.clone();
     let stderr_is_tty = std::io::stderr().is_terminal();
     let ansi = stderr_is_tty && env::var("VIBEBOX_LOG_NO_COLOR").is_err();
