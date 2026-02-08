@@ -58,6 +58,11 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
       - name: Package binary
         run: |
           cd target/release
