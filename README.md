@@ -24,7 +24,12 @@
   <a href="README.zh.md">简体中文</a>
 </p>
 
-[![OpenCode Terminal UI](docs/screenshot.png)](https://vibebox.robcholz.com)
+VibeBox is a lightweight, ultra-fast sandbox that lets AI agents run commands, modify files, and execute code freely
+without permission prompts. It is completely isolated using Apple's Virtualization Framework, so your actual system
+stays
+safe with minimal memory and disk usage.
+
+[![VibeBox Terminal UI](docs/screenshot.png)](https://vibebox.robcholz.com)
 
 ---
 
