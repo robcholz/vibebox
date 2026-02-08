@@ -24,7 +24,7 @@
   <a href="README.md">English</a>
 </p>
 
-VibeBox 是一个轻量、启动极快的沙盒环境，让 AI Agent 可以直接跑命令、改文件、执行代码，不会不停弹“要不要允许”的提示。它基于
+VibeBox 是一个轻量、启动极快的沙盒环境，让 AI Agent 可以安全地直接跑命令、改文件、执行代码，不会不停弹“要不要允许”的提示。它基于
 Apple 的 Virtualization Framework 做到彻底隔离，所以无论 Agent 在里面怎么折腾，你的真实系统都不会被影响；同时做到了低内存和磁盘占用。
 
 [![VibeBox Terminal UI](docs/screenshot.png)](https://vibebox.robcholz.com)

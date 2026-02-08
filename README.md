@@ -25,7 +25,8 @@
 </p>
 
 VibeBox is a lightweight, ultra-fast sandbox that lets AI agents run commands, modify files, and execute code freely
-without permission prompts. It is completely isolated using Apple's Virtualization Framework, so your actual system
+without permission prompts securely. It is completely isolated using Apple's Virtualization Framework, so your actual
+system
 stays
 safe with minimal memory and disk usage.
 
