@@ -6,6 +6,8 @@ on:
       - "**"
     paths-ignore:
       - "README.md"
+      - "CONTRIBUTING.md"
+      - "README.zh.md"
       - "docs/**"
       - "install"
   pull_request:

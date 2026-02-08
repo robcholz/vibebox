@@ -5,7 +5,7 @@
     </picture>
   </a>
 </p>
-<p align="center">The open source AI coding agent.</p>
+<p align="center">Your ultrafast open source AI sandbox.</p>
 
 [![Crates.io][crates-badge]][crates-url]
 [![MIT licensed][mit-badge]][mit-url]
@@ -40,16 +40,96 @@ curl -fsSL https://raw.githubusercontent.com/robcholz/vibebox/main/install | bas
 
 # Package managers
 cargo install vibebox
+
+# Or manually (bad)
+curl -LO https://github.com/robcholz/vibebox/releases/download/latest/vibebox-macos-arm64.zip
+unzip vibebox-macos-arm64.zip
+mkdir -p ~/.local/bin
+mv vibe ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 > [!TIP]
-> We truly recommend you to use `YOLO`.
+> We truly recommend you to use `YOLO` to install.
 
-todo
+**Requirements**
+
+- macOS on Apple Silicon (Vibebox uses Apple's virtualization APIs).
+
+**First Run**
+
+The first `vibebox` run downloads a Debian base image and provisions it. After that, per-project instances reuse the
+cached base image for much faster startups.
 
 ### Documentation
 
-todo
+**Quick Start**
+
+```bash
+cd /path/to/your/project
+vibebox
+```
+
+On first run, Vibebox creates `vibebox.toml` in your project (if missing) and a `.vibebox/` directory for instance data.
+
+**Configuration (`vibebox.toml`)**
+
+`vibebox.toml` lives in your project root by default. You can override it with `vibebox -c path/to/vibebox.toml` or the
+`VIBEBOX_CONFIG_PATH` env var, but the path must stay inside the project directory.
+
+Default config (auto-created when missing):
+
+```toml
+[box]
+cpu_count = 2
+ram_mb = 2048
+disk_gb = 5
+mounts = [
+    "~/.codex:~/.codex:read-write",
+    "~/.claude:~/.claude:read-write",
+]
+
+[supervisor]
+auto_shutdown_ms = 20000
+```
+
+`disk_gb` is only applied when the instance disk is first created. If you change it later, run `vibebox reset` to
+recreate the disk.
+
+**Mounts**
+
+- Your project is mounted read-write at `/usr/local/vibebox-mounts/<project-name>`, and the shell starts there.
+- If a `.git` directory exists, it is masked with a tmpfs mount inside the VM to discourage accidental edits from the
+  guest.
+- Extra mounts come from `box.mounts` with the format `host:guest[:read-only|read-write]`.
+- Host paths support `~` expansion. Relative guest paths are treated as `/root/<path>`.
+- Guest paths that use `~` are linked into `/home/<ssh-user>` for convenience. Run `vibebox explain` to see the resolved
+  host/guest mappings.
+
+**CLI Commands**
+
+```bash
+vibebox             # start or attach to the current project VM
+vibebox list        # list known project sessions
+vibebox reset       # delete .vibebox for this project and recreate on next run
+vibebox purge-cache # delete the global cache (~/.cache/vibebox)
+vibebox explain     # show mounts and network info
+```
+
+**Inside the VM**
+
+- Default SSH user: `vibecoder`
+- Hostname: `vibebox`
+- Base image provisioning installs: build tools, `git`, `curl`, `ripgrep`, `openssh-server`, and `sudo`.
+- On first login, Vibebox installs `mise` and configures tools like `uv`, `node`, `@openai/codex`, and
+  `@anthropic-ai/claude-code` (best-effort).
+- Shell aliases: `:help` and `:exit`.
+
+**State & Cache**
+
+- Project state lives in `.vibebox/` (instance disk, SSH keys, logs, manager socket/pid). `vibebox reset` removes it.
+- Global cache lives in `~/.cache/vibebox` (base image + shared guest cache). `vibebox purge-cache` clears it.
+- Session index lives in `~/.vibebox/sessions` and is shown by `vibebox list`.
 
 ### Contributing
 
