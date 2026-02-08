@@ -1,3 +1,4 @@
+use crate::instance::STATUS_FILE_NAME;
 use crate::session_manager::{GLOBAL_CACHE_DIR_NAME, INSTANCE_DIR_NAME};
 use std::{
     env, fs,
@@ -38,6 +39,39 @@ const DEFAULT_RAM_MB: u64 = 2048;
 const DEFAULT_RAM_BYTES: u64 = DEFAULT_RAM_MB * BYTES_PER_MB;
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
+
+struct StatusFile {
+    path: PathBuf,
+    cleared: AtomicBool,
+}
+
+impl StatusFile {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            cleared: AtomicBool::new(false),
+        }
+    }
+
+    fn update(&self, message: &str) {
+        let _ = fs::write(&self.path, message);
+    }
+
+    fn clear(&self) {
+        if !self.cleared.swap(true, Ordering::SeqCst) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+impl Drop for StatusFile {
+    fn drop(&mut self) {
+        if !self.cleared.load(Ordering::SeqCst) {
+            let _ = fs::remove_file(&self.path);
+            self.cleared.store(true, Ordering::SeqCst);
+        }
+    }
+}
 const PROVISION_SCRIPT: &str = include_str!("provision.sh");
 const PROVISION_SCRIPT_NAME: &str = "provision.sh";
 const DEFAULT_RAW_NAME: &str = "default.raw";
@@ -170,6 +204,8 @@ where
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
 
     let instance_dir = project_root.join(INSTANCE_DIR_NAME);
+    let status_file = StatusFile::new(instance_dir.join(STATUS_FILE_NAME));
+    status_file.update("preparing VM image...");
 
     let basename_compressed = DEBIAN_COMPRESSED_DISK_URL.rsplit('/').next().unwrap();
     let base_compressed = cache_dir.join(basename_compressed);
@@ -193,8 +229,9 @@ where
         &base_compressed,
         &default_raw,
         std::slice::from_ref(&mise_directory_share),
+        Some(&status_file),
     )?;
-    ensure_instance_disk(&instance_raw, &default_raw)?;
+    ensure_instance_disk(&instance_raw, &default_raw, Some(&status_file))?;
     let disk_path = instance_raw;
 
     let mut login_actions = Vec::new();
@@ -239,6 +276,7 @@ where
         &directory_shares[..],
         args.cpu_count,
         args.ram_bytes,
+        Some(&status_file),
         io_handler,
     )
 }
@@ -421,6 +459,7 @@ impl IoControl {
 fn ensure_base_image(
     base_raw: &Path,
     base_compressed: &Path,
+    status: Option<&StatusFile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if base_raw.exists() {
         return Ok(());
@@ -429,6 +468,9 @@ fn ensure_base_image(
     if !base_compressed.exists()
         || std::fs::metadata(base_compressed).map(|m| m.len())? < DEBIAN_COMPRESSED_SIZE_BYTES
     {
+        if let Some(status) = status {
+            status.update("downloading base image...");
+        }
         tracing::info!("downloading base image");
         let status = Command::new("curl")
             .args([
@@ -449,6 +491,9 @@ fn ensure_base_image(
 
     // Check SHA
     {
+        if let Some(status) = status {
+            status.update("verifying base image...");
+        }
         let input = format!("{}  {}\n", DEBIAN_COMPRESSED_SHA, base_compressed.display());
 
         let mut child = Command::new("/usr/bin/shasum")
@@ -470,6 +515,9 @@ fn ensure_base_image(
         }
     }
 
+    if let Some(status) = status {
+        status.update("decompressing base image...");
+    }
     tracing::info!("decompressing base image");
     let status = Command::new("tar")
         .args([
@@ -492,13 +540,17 @@ fn ensure_default_image(
     base_compressed: &Path,
     default_raw: &Path,
     directory_shares: &[DirectoryShare],
+    status: Option<&StatusFile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if default_raw.exists() {
         return Ok(());
     }
 
-    ensure_base_image(base_raw, base_compressed)?;
+    ensure_base_image(base_raw, base_compressed, status)?;
 
+    if let Some(status) = status {
+        status.update("configuring base image...");
+    }
     tracing::info!("configuring base image");
     fs::copy(base_raw, default_raw)?;
 
@@ -509,6 +561,7 @@ fn ensure_default_image(
         directory_shares,
         DEFAULT_CPU_COUNT,
         DEFAULT_RAM_BYTES,
+        None,
     )?;
 
     Ok(())
@@ -517,11 +570,15 @@ fn ensure_default_image(
 fn ensure_instance_disk(
     instance_raw: &Path,
     template_raw: &Path,
+    status: Option<&StatusFile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if instance_raw.exists() {
         return Ok(());
     }
 
+    if let Some(status) = status {
+        status.update("creating instance disk...");
+    }
     tracing::info!(path = %template_raw.display(), "creating instance disk");
     std::fs::create_dir_all(instance_raw.parent().unwrap())?;
     fs::copy(template_raw, instance_raw)?;
@@ -980,6 +1037,7 @@ fn run_vm_with_io<F>(
     directory_shares: &[DirectoryShare],
     cpu_count: usize,
     ram_bytes: u64,
+    status: Option<&StatusFile>,
     io_handler: F,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -1042,6 +1100,10 @@ where
         return Err("Timed out waiting for VM to start".into());
     }
 
+    if let Some(status) = status {
+        status.update("vm booting... go vibecoder!");
+        status.clear();
+    }
     tracing::info!("vm booting");
 
     let output_monitor = Arc::new(OutputMonitor::default());
@@ -1142,6 +1204,7 @@ fn run_vm(
     directory_shares: &[DirectoryShare],
     cpu_count: usize,
     ram_bytes: u64,
+    status: Option<&StatusFile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_vm_with_io(
         disk_path,
@@ -1149,6 +1212,7 @@ fn run_vm(
         directory_shares,
         cpu_count,
         ram_bytes,
+        status,
         spawn_vm_io,
     )
 }

@@ -27,6 +27,7 @@ use crate::{
 
 const SSH_KEY_NAME: &str = "ssh_key";
 pub(crate) const VM_ROOT_LOG_NAME: &str = "vm_root.log";
+pub(crate) const STATUS_FILE_NAME: &str = "status.txt";
 pub(crate) const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
@@ -247,6 +248,8 @@ fn wait_for_vm_ipv4(
     let start = Instant::now();
     let mut next_log_at = start + Duration::from_secs(10);
     tracing::info!("waiting for vm ipv4");
+    let status_path = instance_dir.join(STATUS_FILE_NAME);
+    let mut last_status: Option<String> = None;
     let mut once_hint = false;
     loop {
         let config = load_or_create_instance_config(instance_dir)?;
@@ -260,11 +263,19 @@ fn wait_for_vm_ipv4(
             let waited = start.elapsed();
             if waited.as_secs() > 15 && !once_hint {
                 tracing::info!(
-                    "if vibebox is just initialized in this directory, it might take up to 1 minutes depending on your machine, and then you can enjoy the speed vibecoding! go pack!"
+                    "if vibebox is just initialized in this directory, it might take up to 1 minute depending on your machine, and then you can enjoy secure & speed vibecoding! go pack!"
                 );
                 once_hint = true;
             }
-            tracing::info!("still waiting for vm ipv4, {}s elapsed", waited.as_secs(),);
+            if let Ok(status) = fs::read_to_string(&status_path) {
+                let status = status.trim().to_string();
+                if !status.is_empty() && last_status.as_deref() != Some(status.as_str()) {
+                    tracing::info!("[background]: {}", status);
+                    last_status = Some(status);
+                }
+            } else {
+                tracing::info!("still waiting for vm ipv4, {}s elapsed", waited.as_secs(),);
+            }
             next_log_at += Duration::from_secs(10);
         }
         thread::sleep(Duration::from_millis(200));
