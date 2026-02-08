@@ -25,6 +25,7 @@ use ratatui::{
 
 use crate::vm;
 
+// https://patorjk.com/software/taag/#p=display&f=ANSI+Shadow&t=VIBEBOX&x=none&v=4&h=4&w=80&we=false
 const ASCII_BANNER: [&str; 7] = [
     "██╗   ██╗██╗██████╗ ███████╗██████╗  ██████╗ ██╗  ██╗",
     "██║   ██║██║██╔══██╗██╔════╝██╔══██╗██╔═══██╗╚██╗██╔╝",
