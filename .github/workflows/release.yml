@@ -1,0 +1,63 @@
+name: Build and Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Set short git commit SHA
+        id: vars
+        run: |
+          echo "SHA_SHORT=$(git rev-parse --short ${{ github.sha }})" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date +'%Y-%m-%d')"                       >> $GITHUB_ENV
+
+      - name: Package binary
+        run: |
+          cd target/release
+          zip vibebox-macos-arm64.zip vibebox
+
+      - name: Create sha release
+        run: |
+          gh release create "${{ env.BUILD_DATE }}-${{ env.SHA_SHORT }}" \
+            --title "${{ env.BUILD_DATE }}-${{ env.SHA_SHORT }}" \
+            --notes "Built from commit ${{ github.sha }}" \
+            target/release/vibebox-macos-arm64.zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete existing latest release
+        run: gh release delete latest --cleanup-tag --yes || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create latest release
+        run: |
+          gh release create latest \
+            --title "Latest" \
+            --notes "Built from commit ${{ github.sha }}" \
+            --prerelease \
+            target/release/vibebox-macos-arm64.zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
