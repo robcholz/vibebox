@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert_cmd::Command as AssertCommand;
+use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::TempDir;
 
 #[cfg(target_os = "macos")]
@@ -28,8 +28,7 @@ fn vm_boots_and_runs_command() {
 
     write_config(&project);
 
-    let child = AssertCommand::cargo_bin("vibebox-supervisor")
-        .unwrap()
+    let child = cargo_bin_cmd!("vibebox-supervisor")
         .current_dir(&project)
         .env("HOME", &home)
         .env("XDG_CACHE_HOME", &cache_home)
@@ -112,7 +111,10 @@ fn wait_for_socket(path: &Path, timeout: Duration) -> SocketGuard {
             };
         }
         if start.elapsed() > timeout {
-            panic!("timed out waiting for vm manager socket at {}", path.display());
+            panic!(
+                "timed out waiting for vm manager socket at {}",
+                path.display()
+            );
         }
         thread::sleep(Duration::from_millis(200));
     }

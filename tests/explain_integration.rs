@@ -1,15 +1,9 @@
-use std::{
-    env,
-    ffi::OsString,
-    fs,
-    path::Path,
-    sync::Mutex,
-};
+use std::{env, ffi::OsString, fs, path::Path, sync::Mutex};
 
 use tempfile::TempDir;
 
-use vibebox::{config, explain};
 use vibebox::session_manager::INSTANCE_DIR_NAME;
+use vibebox::{config, explain};
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
@@ -21,7 +15,9 @@ struct EnvGuard {
 impl EnvGuard {
     fn set(key: &'static str, value: &Path) -> Self {
         let previous = env::var_os(key);
-        env::set_var(key, value);
+        unsafe {
+            env::set_var(key, value);
+        }
         Self { key, previous }
     }
 }
@@ -29,8 +25,12 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         match &self.previous {
-            Some(value) => env::set_var(self.key, value),
-            None => env::remove_var(self.key),
+            Some(value) => unsafe {
+                env::set_var(self.key, value);
+            },
+            None => unsafe {
+                env::remove_var(self.key);
+            },
         }
     }
 }
@@ -95,7 +95,11 @@ fn build_network_rows_uses_instance_vm_ip() {
     let project = temp.path().join("project");
     let instance_dir = project.join(INSTANCE_DIR_NAME);
     fs::create_dir_all(&instance_dir).unwrap();
-    fs::write(instance_dir.join("instance.toml"), "vm_ipv4 = \"10.1.2.3\"\n").unwrap();
+    fs::write(
+        instance_dir.join("instance.toml"),
+        "vm_ipv4 = \"10.1.2.3\"\n",
+    )
+    .unwrap();
 
     let rows = explain::build_network_rows(&project).unwrap();
 
