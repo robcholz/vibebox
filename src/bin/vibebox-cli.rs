@@ -12,7 +12,8 @@ use dialoguer::Confirm;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::registry::Registry;
+use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 
 use vibebox::tui::{AppState, VmInfo};
 use vibebox::{
@@ -42,7 +43,7 @@ enum Command {
 fn main() -> Result<()> {
     color_eyre::install()?;
     let cwd = env::current_dir().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
-    init_tracing(&cwd);
+    let stderr_handle = init_tracing(&cwd);
 
     let cli = Cli::parse();
     tracing::info!(cwd = %cwd.display(), "starting vibebox cli");
@@ -105,6 +106,9 @@ fn main() -> Result<()> {
         let mut stdout = io::stdout().lock();
         writeln!(stdout)?;
         stdout.flush()?;
+    }
+    if let Some(handle) = stderr_handle {
+        let _ = handle.modify(|filter| *filter = LevelFilter::INFO);
     }
 
     tracing::info!(auto_shutdown_ms, "auto shutdown config");
@@ -250,8 +254,11 @@ fn format_last_active(value: Option<&str>) -> String {
     format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
 }
 
-fn init_tracing(cwd: &Path) {
+type StderrHandle = reload::Handle<LevelFilter, Registry>;
+
+fn init_tracing(cwd: &Path) -> Option<StderrHandle> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let file_filter = filter.clone();
     let stderr_is_tty = std::io::stderr().is_terminal();
     let ansi = stderr_is_tty && env::var("VIBEBOX_LOG_NO_COLOR").is_err();
     let file = instance::ensure_instance_dir(cwd)
@@ -267,41 +274,42 @@ fn init_tracing(cwd: &Path) {
         });
 
     if stderr_is_tty {
+        let (stderr_filter, handle) = reload::Layer::new(LevelFilter::OFF);
         let stderr_layer = fmt::layer()
             .with_target(false)
             .with_ansi(ansi)
             .without_time()
             .with_writer(std::io::stderr)
-            .with_filter(LevelFilter::INFO);
-        let subscriber = tracing_subscriber::registry()
-            .with(filter)
-            .with(stderr_layer);
+            .with_filter(stderr_filter);
+        let subscriber = tracing_subscriber::registry().with(stderr_layer);
         if let Some(file) = file {
             let file_layer = fmt::layer()
                 .with_target(false)
                 .with_ansi(false)
-                .with_writer(file);
+                .with_writer(file)
+                .with_filter(file_filter);
             let _ = subscriber.with(file_layer).try_init();
         } else {
             let _ = subscriber.try_init();
         }
+        Some(handle)
     } else {
         let stderr_layer = fmt::layer()
             .with_target(false)
             .with_ansi(ansi)
             .with_writer(std::io::stderr)
-            .with_filter(LevelFilter::INFO);
-        let subscriber = tracing_subscriber::registry()
-            .with(filter)
-            .with(stderr_layer);
+            .with_filter(filter);
+        let subscriber = tracing_subscriber::registry().with(stderr_layer);
         if let Some(file) = file {
             let file_layer = fmt::layer()
                 .with_target(false)
                 .with_ansi(false)
-                .with_writer(file);
+                .with_writer(file)
+                .with_filter(file_filter);
             let _ = subscriber.with(file_layer).try_init();
         } else {
             let _ = subscriber.try_init();
         }
+        None
     }
 }
