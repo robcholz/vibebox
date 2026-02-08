@@ -68,3 +68,18 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --locked
+
+  e2e:
+    name: E2E
+    runs-on: macos-latest
+    needs: [fmt, clippy, build, test]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+      - name: Run VM E2E
+        env:
+          VIBEBOX_E2E_VM: "1"
+        run: cargo test --locked --test e2e_vm -- --ignored
