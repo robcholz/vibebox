@@ -10,15 +10,15 @@ use std::{
 use clap::Parser;
 use color_eyre::Result;
 use dialoguer::Confirm;
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::registry::Registry;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
+use tracing_subscriber::{fmt, prelude::*, reload, EnvFilter};
 
 use vibebox::tui::{AppState, VmInfo};
 use vibebox::{
-    SessionManager, commands, config, explain, instance, session_manager, tui, vm, vm_manager,
+    commands, config, explain, instance, session_manager, tui, vm, vm_manager, SessionManager,
 };
 
 #[derive(Debug, Parser)]
@@ -114,12 +114,14 @@ fn main() -> Result<()> {
         let _ = handle.modify(|filter| *filter = LevelFilter::INFO);
     }
 
-    tracing::info!(auto_shutdown_ms, "auto shutdown config");
+    tracing::debug!(auto_shutdown_ms, "auto shutdown config");
     let manager_conn =
         vm_manager::ensure_manager(&raw_args, auto_shutdown_ms, config_override.as_deref())
             .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
 
     instance::run_with_ssh(manager_conn).map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+
+    tracing::info!("See you again — keep vibecoding (no SEVs, only vibes) 😈");
 
     Ok(())
 }

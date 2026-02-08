@@ -144,7 +144,7 @@ fn spawn_manager_process(
     if let Some(path) = config_path {
         cmd.env(CONFIG_PATH_ENV, path);
     }
-    tracing::info!(auto_shutdown_ms, "vm manager process spawn requested");
+    tracing::debug!(auto_shutdown_ms, "vm manager process spawn requested");
     let log_path = instance_dir.join(VM_MANAGER_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
