@@ -1297,7 +1297,7 @@ pub fn ensure_signed() {
     let entitlements_path = std::env::temp_dir().join("entitlements.plist");
     std::fs::write(&entitlements_path, ENTITLEMENTS).expect("failed to write entitlements");
 
-    let status = Command::new("codesign")
+    let output = Command::new("codesign")
         .args([
             "--sign",
             "-",
@@ -1306,18 +1306,23 @@ pub fn ensure_signed() {
             entitlements_path.to_str().unwrap(),
             exe_str,
         ])
-        .status();
+        .output();
 
     let _ = std::fs::remove_file(&entitlements_path);
 
-    match status {
-        Ok(s) if s.success() => {
+    match output {
+        Ok(o) if o.status.success() => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.trim().is_empty() {
+                tracing::debug!(codesign_stderr = %stderr.trim(), "codesign output");
+            }
             let err = Command::new(&exe).args(std::env::args_os().skip(1)).exec();
             tracing::error!(error = %err, "failed to re-exec after signing");
             std::process::exit(1);
         }
-        Ok(s) => {
-            tracing::error!(status = %s, "codesign failed");
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            tracing::error!(status = %o.status, codesign_stderr = %stderr.trim(), "codesign failed");
             std::process::exit(1);
         }
         Err(e) => {
