@@ -43,6 +43,11 @@ systemctl restart ssh
 # Set this env var so claude doesn't complain about running as root.'
 echo "export IS_SANDBOX=1" >> .bashrc
 
+# Ensure cloned instances generate unique machine-id on first boot.
+truncate -s 0 /etc/machine-id
+rm -f /var/lib/dbus/machine-id
+ln -sf /etc/machine-id /var/lib/dbus/machine-id
+
 # Shutdown the VM when you logout 
 cat > .bash_logout <<EOF
 systemctl poweroff
