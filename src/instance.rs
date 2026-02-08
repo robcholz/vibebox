@@ -68,7 +68,7 @@ pub fn run_with_ssh(manager_conn: UnixStream) -> Result<(), Box<dyn std::error::
     tracing::debug!(ssh_user = %ssh_user, "loaded instance config");
 
     let _manager_conn = manager_conn;
-    wait_for_vm_ipv4(&instance_dir, Duration::from_secs(120))?;
+    wait_for_vm_ipv4(&instance_dir, Duration::from_secs(480))?;
 
     let ip = load_or_create_instance_config(&instance_dir)?
         .vm_ipv4
@@ -242,19 +242,41 @@ fn wait_for_vm_ipv4(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let mut next_log_at = start + Duration::from_secs(10);
+    let mut next_status_check = start;
     tracing::info!("waiting for vm ipv4");
     let status_path = instance_dir.join(STATUS_FILE_NAME);
     let mut last_status: Option<String> = None;
+    let mut status_missing = true;
     let mut once_hint = false;
     loop {
         let config = load_or_create_instance_config(instance_dir)?;
         if config.vm_ipv4.is_some() {
+            let _ = fs::remove_file(&status_path);
             return Ok(());
         }
         if start.elapsed() > timeout {
+            let _ = fs::remove_file(&status_path);
             return Err("Timed out waiting for VM IPv4".into());
         }
-        if Instant::now() >= next_log_at {
+        let now = Instant::now();
+        if now >= next_status_check {
+            match fs::read_to_string(&status_path) {
+                Ok(status) => {
+                    status_missing = false;
+                    let status = status.trim().to_string();
+                    if !status.is_empty() && last_status.as_deref() != Some(status.as_str()) {
+                        tracing::info!("[background]: {}", status);
+                        last_status = Some(status);
+                        next_log_at = now + Duration::from_secs(20);
+                    }
+                }
+                Err(_) => {
+                    status_missing = true;
+                }
+            }
+            next_status_check = now + Duration::from_millis(500);
+        }
+        if now >= next_log_at {
             let waited = start.elapsed();
             if waited.as_secs() > 15 && !once_hint {
                 tracing::info!(
@@ -262,16 +284,10 @@ fn wait_for_vm_ipv4(
                 );
                 once_hint = true;
             }
-            if let Ok(status) = fs::read_to_string(&status_path) {
-                let status = status.trim().to_string();
-                if !status.is_empty() && last_status.as_deref() != Some(status.as_str()) {
-                    tracing::info!("[background]: {}", status);
-                    last_status = Some(status);
-                }
-            } else {
+            if status_missing {
                 tracing::info!("still waiting for vm ipv4, {}s elapsed", waited.as_secs(),);
             }
-            next_log_at += Duration::from_secs(10);
+            next_log_at += Duration::from_secs(20);
         }
         thread::sleep(Duration::from_millis(200));
     }
