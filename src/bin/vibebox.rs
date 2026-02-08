@@ -49,7 +49,7 @@ fn main() -> Result<()> {
     let stderr_handle = init_tracing(&cwd);
 
     let cli = Cli::parse();
-    tracing::info!(cwd = %cwd.display(), "starting vibebox cli");
+    tracing::debug!(cwd = %cwd.display(), "starting vibebox cli");
     if let Some(command) = cli.command {
         return handle_command(command, &cwd, cli.config.as_deref());
     }
@@ -85,7 +85,6 @@ fn main() -> Result<()> {
         no_default_mounts: false,
         mounts: config.box_cfg.mounts.clone(),
     };
-
     let auto_shutdown_ms = config.supervisor.auto_shutdown_ms;
     let vm_info = VmInfo {
         max_memory_mb: vm_args.ram_bytes / (1024 * 1024),
@@ -113,6 +112,7 @@ fn main() -> Result<()> {
         writeln!(stdout)?;
         stdout.flush()?;
     }
+    warn_disk_size_mismatch(&cwd, vm_args.disk_bytes);
     if let Some(handle) = stderr_handle {
         let _ = handle.modify(|filter| *filter = LevelFilter::INFO);
     }
@@ -354,6 +354,27 @@ fn format_last_active(value: Option<&str>) -> String {
     format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
 }
 
+fn warn_disk_size_mismatch(cwd: &Path, configured_bytes: u64) {
+    let instance_raw = cwd
+        .join(session_manager::INSTANCE_DIR_NAME)
+        .join("instance.raw");
+    let Ok(meta) = fs::metadata(&instance_raw) else {
+        return;
+    };
+    let current_bytes = meta.len();
+    if current_bytes == configured_bytes {
+        return;
+    }
+    let current_gb = current_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let target_gb = configured_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    tracing::warn!(
+        "instance disk size does not match config (current {:.2} GB, config {:.2} GB). \
+disk_gb applies only on init. Run `vibebox reset` to recreate or set disk_gb to match; using the existing disk.",
+        current_gb,
+        target_gb
+    );
+}
+
 type StderrHandle = reload::Handle<LevelFilter, Registry>;
 
 fn init_tracing(cwd: &Path) -> Option<StderrHandle> {
@@ -374,7 +395,7 @@ fn init_tracing(cwd: &Path) -> Option<StderrHandle> {
         });
 
     if stderr_is_tty {
-        let (stderr_filter, handle) = reload::Layer::new(LevelFilter::OFF);
+        let (stderr_filter, handle) = reload::Layer::new(LevelFilter::INFO);
         let stderr_layer = fmt::layer()
             .with_target(false)
             .with_ansi(ansi)

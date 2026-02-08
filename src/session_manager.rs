@@ -117,7 +117,7 @@ impl SessionManager {
         }
 
         if removed > 0 || added {
-            tracing::info!(
+            tracing::debug!(
                 path = %self.sessions_dir.display(),
                 removed,
                 added,
@@ -196,7 +196,7 @@ impl SessionManager {
         let path = self.session_path_for(&record.id);
         let content = toml::to_string_pretty(record)?;
         atomic_write(&path, content.as_bytes())?;
-        tracing::info!(
+        tracing::debug!(
             path = %path.display(),
             "wrote session record"
         );
