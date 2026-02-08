@@ -429,7 +429,7 @@ fn ensure_base_image(
     if !base_compressed.exists()
         || std::fs::metadata(base_compressed).map(|m| m.len())? < DEBIAN_COMPRESSED_SIZE_BYTES
     {
-        println!("Downloading base image...");
+        tracing::info!("downloading base image");
         let status = Command::new("curl")
             .args([
                 "--continue-at",
@@ -470,7 +470,7 @@ fn ensure_base_image(
         }
     }
 
-    println!("Decompressing base image...");
+    tracing::info!("decompressing base image");
     let status = Command::new("tar")
         .args([
             "-xOf",
@@ -499,7 +499,7 @@ fn ensure_default_image(
 
     ensure_base_image(base_raw, base_compressed)?;
 
-    println!("Configuring base image...");
+    tracing::info!("configuring base image");
     fs::copy(base_raw, default_raw)?;
 
     let provision_command = script_command_from_content(PROVISION_SCRIPT_NAME, PROVISION_SCRIPT)?;
@@ -522,7 +522,7 @@ fn ensure_instance_disk(
         return Ok(());
     }
 
-    println!("Creating instance disk from {}...", template_raw.display());
+    tracing::info!(path = %template_raw.display(), "creating instance disk");
     std::fs::create_dir_all(instance_raw.parent().unwrap())?;
     fs::copy(template_raw, instance_raw)?;
     Ok(())
@@ -961,7 +961,7 @@ fn spawn_login_actions_thread(
                     let command = match script_command_from_path(&path, index) {
                         Ok(command) => command,
                         Err(err) => {
-                            eprintln!("{err}");
+                            tracing::error!(error = %err, "failed to build login script command");
                             return;
                         }
                     };
@@ -1042,7 +1042,7 @@ where
         return Err("Timed out waiting for VM to start".into());
     }
 
-    println!("VM booting...");
+    tracing::info!("vm booting");
 
     let output_monitor = Arc::new(OutputMonitor::default());
     let io_ctx = io_handler(output_monitor.clone(), we_read_from, we_write_to);
@@ -1111,7 +1111,7 @@ where
                 unsafe {
                     if vm.canRequestStop() {
                         if let Err(err) = vm.requestStopWithError() {
-                            eprintln!("Failed to request VM stop: {:?}", err);
+                            tracing::error!(error = ?err, "failed to request VM stop");
                         }
                     } else if vm.canStop() {
                         let handler = RcBlock::new(|_error: *mut NSError| {});
@@ -1249,15 +1249,15 @@ pub fn ensure_signed() {
     match status {
         Ok(s) if s.success() => {
             let err = Command::new(&exe).args(std::env::args_os().skip(1)).exec();
-            eprintln!("failed to re-exec after signing: {err}");
+            tracing::error!(error = %err, "failed to re-exec after signing");
             std::process::exit(1);
         }
         Ok(s) => {
-            eprintln!("codesign failed with status: {s}");
+            tracing::error!(status = %s, "codesign failed");
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("failed to run codesign: {e}");
+            tracing::error!(error = %e, "failed to run codesign");
             std::process::exit(1);
         }
     }

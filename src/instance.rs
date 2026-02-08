@@ -26,7 +26,7 @@ use crate::{
 };
 
 const SSH_KEY_NAME: &str = "ssh_key";
-pub(crate) const SERIAL_LOG_NAME: &str = "serial.log";
+pub(crate) const VM_ROOT_LOG_NAME: &str = "vm_root.log";
 pub(crate) const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
@@ -72,7 +72,6 @@ pub fn run_with_ssh(manager_conn: UnixStream) -> Result<(), Box<dyn std::error::
     tracing::debug!(ssh_user = %ssh_user, "loaded instance config");
 
     let _manager_conn = manager_conn;
-    tracing::debug!("waiting for vm ipv4");
     wait_for_vm_ipv4(&instance_dir, Duration::from_secs(120))?;
 
     let ip = load_or_create_instance_config(&instance_dir)?
@@ -118,7 +117,7 @@ pub(crate) fn ensure_ssh_keypair(
             "vibebox",
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()?;
 
@@ -246,6 +245,9 @@ fn wait_for_vm_ipv4(
     timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
+    let mut next_log_at = start + Duration::from_secs(10);
+    tracing::info!("waiting for vm ipv4");
+    let mut once_hint = false;
     loop {
         let config = load_or_create_instance_config(instance_dir)?;
         if config.vm_ipv4.is_some() {
@@ -254,8 +256,16 @@ fn wait_for_vm_ipv4(
         if start.elapsed() > timeout {
             return Err("Timed out waiting for VM IPv4".into());
         }
-        if start.elapsed().as_secs() % 5 == 0 {
-            tracing::debug!("still waiting for vm ipv4");
+        if Instant::now() >= next_log_at {
+            let waited = start.elapsed();
+            if waited.as_secs() > 15 && !once_hint {
+                tracing::info!(
+                    "if vibebox is just initialized in this directory, it might take up to 1 minutes depending on your machine, and then you can enjoy the speed vibecoding! go pack!"
+                );
+                once_hint = true;
+            }
+            tracing::info!("still waiting for vm ipv4, {}s elapsed", waited.as_secs(),);
+            next_log_at += Duration::from_secs(10);
         }
         thread::sleep(Duration::from_millis(200));
     }
@@ -270,9 +280,13 @@ fn run_ssh_session(
     loop {
         attempts += 1;
         if !ssh_port_open(&ip) {
-            tracing::debug!(attempts, "ssh port not open yet");
-            eprintln!(
-                "[vibebox] waiting for ssh port on {ip} (attempt {attempts}/{SSH_CONNECT_RETRIES})"
+            tracing::debug!(attempts, "ssh port doesn't open yet");
+            tracing::info!(
+                attempts,
+                ip = %ip,
+                "waiting for ssh port ({}/{})",
+                attempts,
+                SSH_CONNECT_RETRIES
             );
             if attempts >= SSH_CONNECT_RETRIES {
                 return Err(
@@ -283,10 +297,14 @@ fn run_ssh_session(
             continue;
         }
 
-        eprintln!(
-            "[vibebox] starting ssh to {ssh_user}@{ip} (attempt {attempts}/{SSH_CONNECT_RETRIES})"
+        tracing::info!(
+            attempts,
+            user = %ssh_user,
+            ip = %ip,
+            "starting ssh ({}/{})",
+            attempts,
+            SSH_CONNECT_RETRIES
         );
-        tracing::info!(attempts, user = %ssh_user, ip = %ip, "starting ssh");
         let status = Command::new("ssh")
             .args([
                 "-i",
@@ -319,21 +337,22 @@ fn run_ssh_session(
 
         match status {
             Ok(status) if status.success() => {
-                eprintln!("[vibebox] ssh exited with status: {status}");
+                tracing::info!(status = %status, "ssh exited");
                 break;
             }
             Ok(status) if status.code() == Some(255) => {
-                eprintln!("[vibebox] ssh connection failed: {status}");
+                tracing::warn!(status = %status, "ssh connection failed");
                 if attempts >= SSH_CONNECT_RETRIES {
                     return Err(format!("ssh failed after {SSH_CONNECT_RETRIES} attempts").into());
                 }
                 thread::sleep(Duration::from_millis(500));
             }
             Ok(status) => {
-                eprintln!("[vibebox] ssh exited with status: {status}");
+                tracing::info!(status = %status, "ssh exited");
                 break;
             }
             Err(err) => {
+                tracing::error!(error = %err, "failed to start ssh");
                 return Err(format!("failed to start ssh: {err}").into());
             }
         }
@@ -404,7 +423,7 @@ fn spawn_ssh_io(
 ) -> vm::IoContext {
     let io_control = vm::IoControl::new();
 
-    let log_path = instance_dir.join(SERIAL_LOG_NAME);
+    let log_path = instance_dir.join(VM_ROOT_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -458,7 +477,7 @@ fn spawn_ssh_io(
                         if cfg.vm_ipv4.as_deref() != Some(ip.as_str()) {
                             cfg.vm_ipv4 = Some(ip.clone());
                             let _ = write_instance_config(&instance_path, &cfg);
-                            eprintln!("[vibebox] detected vm IPv4: {ip}");
+                            tracing::info!(ip = %ip, "detected vm ipv4");
                         }
                     }
                 }
@@ -466,7 +485,7 @@ fn spawn_ssh_io(
 
             if cleaned.contains("VIBEBOX_SSH_READY") {
                 ssh_ready_for_output.store(true, Ordering::SeqCst);
-                eprintln!("[vibebox] sshd ready");
+                tracing::info!("sshd ready");
             }
         }
     };
@@ -517,7 +536,7 @@ fn spawn_ssh_io(
                     break;
                 }
 
-                eprintln!("[vibebox] starting ssh to {ssh_user}@{ip}");
+                tracing::info!(user = %ssh_user, ip = %ip, "starting ssh");
                 io_control_for_thread.request_terminal_restore();
                 io_control_for_thread.set_forward_output(false);
                 io_control_for_thread.set_forward_input(false);
@@ -527,13 +546,19 @@ fn spawn_ssh_io(
                 loop {
                     attempts += 1;
                     if !ssh_port_open(&ip) {
-                        eprintln!(
-                            "[vibebox] waiting for ssh port on {ip} (attempt {attempts}/{SSH_CONNECT_RETRIES})"
+                        tracing::info!(
+                            attempts,
+                            ip = %ip,
+                            "waiting for ssh port ({}/{})",
+                            attempts,
+                            SSH_CONNECT_RETRIES
                         );
                         if attempts >= SSH_CONNECT_RETRIES {
                             ssh_connected_for_thread.store(false, Ordering::SeqCst);
-                            eprintln!(
-                                "[vibebox] ssh port not ready after {SSH_CONNECT_RETRIES} attempts"
+                            tracing::warn!(
+                                attempts,
+                                "ssh port not ready after {} attempts",
+                                SSH_CONNECT_RETRIES
                             );
                             break;
                         }
@@ -541,8 +566,13 @@ fn spawn_ssh_io(
                         continue;
                     }
 
-                    eprintln!(
-                        "[vibebox] starting ssh to {ssh_user}@{ip} (attempt {attempts}/{SSH_CONNECT_RETRIES})"
+                    tracing::info!(
+                        attempts,
+                        user = %ssh_user,
+                        ip = %ip,
+                        "starting ssh ({}/{})",
+                        attempts,
+                        SSH_CONNECT_RETRIES
                     );
                     let status = Command::new("ssh")
                         .args([
@@ -577,18 +607,20 @@ fn spawn_ssh_io(
                     match status {
                         Ok(status) if status.success() => {
                             ssh_connected_for_thread.store(false, Ordering::SeqCst);
-                            eprintln!("[vibebox] ssh exited with status: {status}");
+                            tracing::info!(status = %status, "ssh exited");
                             if let Some(tx) = input_tx_holder_for_thread.lock().unwrap().clone() {
                                 let _ = tx.send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()));
                             }
                             break;
                         }
                         Ok(status) if status.code() == Some(255) => {
-                            eprintln!("[vibebox] ssh connection failed: {status}");
+                            tracing::warn!(status = %status, "ssh connection failed");
                             if attempts >= SSH_CONNECT_RETRIES {
                                 ssh_connected_for_thread.store(false, Ordering::SeqCst);
-                                eprintln!(
-                                    "[vibebox] ssh failed after {SSH_CONNECT_RETRIES} attempts"
+                                tracing::warn!(
+                                    attempts,
+                                    "ssh failed after {} attempts",
+                                    SSH_CONNECT_RETRIES
                                 );
                                 break;
                             }
@@ -597,7 +629,7 @@ fn spawn_ssh_io(
                         }
                         Ok(status) => {
                             ssh_connected_for_thread.store(false, Ordering::SeqCst);
-                            eprintln!("[vibebox] ssh exited with status: {status}");
+                            tracing::info!(status = %status, "ssh exited");
                             if let Some(tx) = input_tx_holder_for_thread.lock().unwrap().clone() {
                                 let _ = tx.send(VmInput::Bytes(b"systemctl poweroff\n".to_vec()));
                             }
@@ -605,7 +637,7 @@ fn spawn_ssh_io(
                         }
                         Err(err) => {
                             ssh_connected_for_thread.store(false, Ordering::SeqCst);
-                            eprintln!("[vibebox] failed to start ssh: {err}");
+                            tracing::error!(error = %err, "failed to start ssh");
                             break;
                         }
                     }

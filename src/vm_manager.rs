@@ -17,7 +17,7 @@ use std::{
 
 use crate::{
     config::CONFIG_PATH_ENV,
-    instance::SERIAL_LOG_NAME,
+    instance::VM_ROOT_LOG_NAME,
     instance::{
         DEFAULT_SSH_USER, InstanceConfig, build_ssh_login_actions, ensure_instance_dir,
         ensure_ssh_keypair, extract_ipv4, load_or_create_instance_config, write_instance_config,
@@ -451,7 +451,7 @@ fn spawn_manager_io(
     vm_output_fd: std::os::unix::io::OwnedFd,
     vm_input_fd: std::os::unix::io::OwnedFd,
 ) -> vm::IoContext {
-    let log_path = instance_dir.join(SERIAL_LOG_NAME);
+    let log_path = instance_dir.join(VM_ROOT_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)

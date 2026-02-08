@@ -279,6 +279,6 @@ fn validate_or_exit(config: &Config) {
 }
 
 fn die(message: &str) -> ! {
-    eprintln!("[vibebox] {message}");
+    tracing::error!("{message}");
     std::process::exit(1);
 }

@@ -5,6 +5,9 @@ use std::{
 
 use color_eyre::Result;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt;
+use tracing_subscriber::prelude::*;
 
 use vibebox::{config, instance, vm, vm_manager};
 
@@ -40,11 +43,22 @@ fn main() -> Result<()> {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let ansi = std::io::stderr().is_terminal() && env::var("VIBEBOX_LOG_NO_COLOR").is_err();
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_ansi(ansi)
-        .with_writer(io::stderr)
-        .try_init();
+    let stderr_is_tty = std::io::stderr().is_terminal();
+    let ansi = stderr_is_tty && env::var("VIBEBOX_LOG_NO_COLOR").is_err();
+    if stderr_is_tty {
+        let stderr_layer = fmt::layer()
+            .with_target(false)
+            .with_ansi(ansi)
+            .without_time()
+            .with_writer(io::stderr)
+            .with_filter(LevelFilter::INFO);
+        let _ = tracing_subscriber::registry().with(stderr_layer).try_init();
+    } else {
+        let stderr_layer = fmt::layer()
+            .with_target(false)
+            .with_ansi(ansi)
+            .with_writer(io::stderr)
+            .with_filter(filter);
+        let _ = tracing_subscriber::registry().with(stderr_layer).try_init();
+    }
 }
