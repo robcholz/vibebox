@@ -62,8 +62,7 @@ Here’s why I didn’t just use existing options:
   the multi-instance + session management my workflow wants.
 - **QEMU**: powerful, but the configuration surface area is huge. For day-to-day sandboxing it’s not “open a repo and
   go” — it’s a project on its own.
-- **Docker / devcontainers**: great ecosystem, but for daily use it feels heavy. Cold starts can be slow, and it’s not
-  something I can jump into instantly, repeatedly, all day.
+- **Docker / devcontainers**: great ecosystem, but for daily use it feels heavy.
 
 That’s what pushed me to build **VibeBox**: I wanted a per-project sandbox that’s fast to enter (just `vibebox`),
 supports real configuration + sessions, and keeps a hard isolation boundary.
