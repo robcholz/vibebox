@@ -1,6 +1,6 @@
 [package]
 name = "vibebox"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2024"
 authors = ["Finn Sheng"]
 description = "Ultrafast CLI on Apple Silicon macOS for fast, sandboxed development and LLM agents."
