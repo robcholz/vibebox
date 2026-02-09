@@ -1,12 +1,12 @@
 #!/bin/bash
 set -eEux
 
-trap 'echo "[vibebox][error] provisioning failed"; echo "VIBEBOX_PROVISION_FAILED"; systemctl poweroff || true; exit 1' ERR
+trap 'rc=$?; echo "[vibebox][error] provisioning failed at: ${BASH_COMMAND} (exit ${rc})"; echo "VIBEBOX_PROVISION_FAILED"; systemctl poweroff || true; exit 1' ERR
 
 # Wait for network + DNS before apt-get to avoid early boot flakiness.
 wait_for_network() {
   echo "[vibebox] waiting for network/DNS readiness"
-  local deadline=$((SECONDS + 60))
+  local deadline=$((SECONDS + 180))
   while [ "$SECONDS" -lt "$deadline" ]; do
     local has_route=0
     if ip -4 route show default >/dev/null 2>&1; then
@@ -21,7 +21,7 @@ wait_for_network() {
     fi
     sleep 1
   done
-  echo "[vibebox][warn] network/DNS still not ready after 60s; continuing" >&2
+  echo "[vibebox][warn] network/DNS still not ready after 180s; continuing" >&2
   echo "[vibebox][warn] /etc/resolv.conf:" >&2
   cat /etc/resolv.conf >&2 || true
   ip -br addr >&2 || true
@@ -44,9 +44,9 @@ apt_update_with_retries() {
 }
 
 # Don't wait too long for slow mirrors.
-echo 'Acquire::http::Timeout "2";' | tee /etc/apt/apt.conf.d/99timeout
-echo 'Acquire::https::Timeout "2";' | tee -a /etc/apt/apt.conf.d/99timeout
-echo 'Acquire::Retries "2";' | tee -a /etc/apt/apt.conf.d/99timeout
+echo 'Acquire::http::Timeout "10";' | tee /etc/apt/apt.conf.d/99timeout
+echo 'Acquire::https::Timeout "10";' | tee -a /etc/apt/apt.conf.d/99timeout
+echo 'Acquire::Retries "5";' | tee -a /etc/apt/apt.conf.d/99timeout
 
 wait_for_network
 apt_update_with_retries
