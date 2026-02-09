@@ -17,6 +17,7 @@ use std::{
 
 use crate::{
     config::CONFIG_PATH_ENV,
+    instance::STATUS_FILE_NAME,
     instance::VM_ROOT_LOG_NAME,
     instance::{
         DEFAULT_SSH_USER, InstanceConfig, build_ssh_login_actions, ensure_instance_dir,
@@ -765,6 +766,10 @@ fn run_manager_with(
     );
     tracing::info!("vm manager vm run completed");
     let vm_err = vm_result.err().map(|e| e.to_string());
+    if let Some(err) = &vm_err {
+        let status_path = instance_dir.join(STATUS_FILE_NAME);
+        let _ = fs::write(&status_path, format!("error: {err}"));
+    }
     let _ = event_tx.send(ManagerEvent::VmExited(vm_err.clone()));
     let event_loop_result: Result<(), String> = event_loop_handle
         .join()

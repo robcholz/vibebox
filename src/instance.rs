@@ -266,6 +266,11 @@ fn wait_for_vm_ipv4(
                 Ok(status) => {
                     status_missing = false;
                     let status = status.trim().to_string();
+                    if status.starts_with("error:") {
+                        let _ = fs::remove_file(&status_path);
+                        let message = status.trim_start_matches("error:").trim().to_string();
+                        return Err(message.into());
+                    }
                     if !status.is_empty() && last_status.as_deref() != Some(status.as_str()) {
                         tracing::info!("[background]: {}", status);
                         last_status = Some(status);

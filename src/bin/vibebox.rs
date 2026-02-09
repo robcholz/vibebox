@@ -120,9 +120,15 @@ fn main() -> Result<()> {
     tracing::debug!(auto_shutdown_ms, "auto shutdown config");
     let manager_conn =
         vm_manager::ensure_manager(&raw_args, auto_shutdown_ms, config_override.as_deref())
-            .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+            .map_err(|err| {
+                tracing::error!(error = %err, "failed to ensure vm manager");
+                color_eyre::eyre::eyre!(err.to_string())
+            })?;
 
-    instance::run_with_ssh(manager_conn).map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    instance::run_with_ssh(manager_conn).map_err(|err| {
+        tracing::error!(error = %err, "failed to ensure vm manager");
+        color_eyre::eyre::eyre!(err.to_string())
+    })?;
 
     tracing::info!("See you again — keep vibecoding (no SEVs, only vibes) 😈");
 
