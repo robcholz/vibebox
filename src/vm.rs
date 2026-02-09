@@ -40,6 +40,7 @@ const DEFAULT_RAM_MB: u64 = 2048;
 const DEFAULT_RAM_BYTES: u64 = DEFAULT_RAM_MB * BYTES_PER_MB;
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVISION_EXPECT_TIMEOUT: Duration = Duration::from_secs(900);
 
 struct StatusFile {
     path: PathBuf,
@@ -76,7 +77,15 @@ const BASE_DISK_RAW_NAME: &str = "disk.raw";
 
 #[derive(Clone)]
 pub(crate) enum LoginAction {
-    Expect { text: String, timeout: Duration },
+    Expect {
+        text: String,
+        timeout: Duration,
+    },
+    ExpectEither {
+        success: String,
+        failure: String,
+        timeout: Duration,
+    },
     Send(String),
 }
 use LoginAction::*;
@@ -359,6 +368,12 @@ enum WaitResult {
     Found,
 }
 
+#[derive(PartialEq, Eq)]
+enum WaitAnyResult {
+    Timeout,
+    Found(usize),
+}
+
 pub enum VmInput {
     Bytes(Vec<u8>),
     Shutdown,
@@ -366,6 +381,7 @@ pub enum VmInput {
 
 enum VmOutput {
     LoginActionTimeout { action: String, timeout: Duration },
+    LoginActionFailed { action: String, reason: String },
 }
 
 #[derive(Default)]
@@ -402,6 +418,41 @@ impl OutputMonitor {
             WaitResult::Found
         }
     }
+
+    fn wait_for_any(&self, needles: &[&str], timeout: Duration) -> WaitAnyResult {
+        let mut found: Option<usize> = None;
+        let (_unused, timeout_result) = self
+            .condvar
+            .wait_timeout_while(self.buffer.lock().unwrap(), timeout, |buf| {
+                if let Some((pos, idx, len)) = find_any(buf, needles) {
+                    *buf = buf[(pos + len)..].to_string();
+                    found = Some(idx);
+                    false
+                } else {
+                    true
+                }
+            })
+            .unwrap();
+
+        if timeout_result.timed_out() {
+            WaitAnyResult::Timeout
+        } else {
+            WaitAnyResult::Found(found.unwrap_or(0))
+        }
+    }
+}
+
+fn find_any(buf: &str, needles: &[&str]) -> Option<(usize, usize, usize)> {
+    let mut best: Option<(usize, usize, usize)> = None; // (pos, idx, len)
+    for (idx, needle) in needles.iter().enumerate() {
+        if let Some(pos) = buf.find(needle) {
+            let candidate = (pos, idx, needle.len());
+            if best.is_none_or(|b| candidate.0 < b.0) {
+                best = Some(candidate);
+            }
+        }
+    }
+    best
 }
 
 #[derive(Debug)]
@@ -546,14 +597,25 @@ fn ensure_default_image(
     fs::copy(base_raw, default_raw)?;
 
     let provision_command = script_command_from_content(PROVISION_SCRIPT_NAME, PROVISION_SCRIPT)?;
-    run_vm(
+    let provision_actions = [
+        Send(provision_command),
+        ExpectEither {
+            success: "VIBEBOX_PROVISION_OK".to_string(),
+            failure: "VIBEBOX_PROVISION_FAILED".to_string(),
+            timeout: PROVISION_EXPECT_TIMEOUT,
+        },
+    ];
+    if let Err(err) = run_vm(
         default_raw,
-        &[Send(provision_command)],
+        &provision_actions,
         directory_shares,
         DEFAULT_CPU_COUNT,
         DEFAULT_RAM_BYTES,
         None,
-    )?;
+    ) {
+        let _ = fs::remove_file(default_raw);
+        return Err(err);
+    }
 
     Ok(())
 }
@@ -1033,6 +1095,27 @@ fn spawn_login_actions_thread(
                         return;
                     }
                 }
+                ExpectEither {
+                    success,
+                    failure,
+                    timeout,
+                } => match output_monitor.wait_for_any(&[&success, &failure], timeout) {
+                    WaitAnyResult::Found(0) => {}
+                    WaitAnyResult::Found(_) => {
+                        let _ = vm_output_tx.send(VmOutput::LoginActionFailed {
+                            action: format!("expect '{}'", success),
+                            reason: format!("saw failure marker '{}'", failure),
+                        });
+                        return;
+                    }
+                    WaitAnyResult::Timeout => {
+                        let _ = vm_output_tx.send(VmOutput::LoginActionTimeout {
+                            action: format!("expect '{}'", success),
+                            timeout,
+                        });
+                        return;
+                    }
+                },
                 Send(mut text) => {
                     text.push('\n'); // Type the newline so the command is actually submitted.
                     input_tx.send(VmInput::Bytes(text.into_bytes())).unwrap();
@@ -1178,6 +1261,24 @@ where
                 exit_result = Err(format!(
                     "Login action ({}) timed out after {:?}; shutting down.",
                     action, timeout
+                )
+                .into());
+                unsafe {
+                    if vm.canRequestStop() {
+                        if let Err(err) = vm.requestStopWithError() {
+                            tracing::error!(error = ?err, "failed to request VM stop");
+                        }
+                    } else if vm.canStop() {
+                        let handler = RcBlock::new(|_error: *mut NSError| {});
+                        vm.stopWithCompletionHandler(&handler);
+                    }
+                }
+                break;
+            }
+            Ok(VmOutput::LoginActionFailed { action, reason }) => {
+                exit_result = Err(format!(
+                    "Login action ({}) failed: {}; shutting down.",
+                    action, reason
                 )
                 .into());
                 unsafe {
