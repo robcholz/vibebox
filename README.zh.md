@@ -53,22 +53,19 @@ sessions，同时还保留明确的硬隔离边界。
 ### 安装
 
 ```bash
-# YOLO：一键安装（推荐）
+# YOLO：一键安装
 curl -fsSL https://raw.githubusercontent.com/robcholz/vibebox/main/install | bash
 
 # Cargo
 cargo install vibebox
 
-# 或者手动安装（不推荐）
+# 或者手动安装
 curl -LO https://github.com/robcholz/vibebox/releases/download/latest/vibebox-macos-arm64.zip
 unzip vibebox-macos-arm64.zip
 mkdir -p ~/.local/bin
-mv vibe ~/.local/bin
+mv vibebox ~/.local/bin
 export PATH="$HOME/.local/bin:$PATH"
 ```
-
-> [!TIP]
-> 强烈建议直接用 `YOLO` 方式安装，省事且更不容易踩坑。
 
 **系统要求**
 
@@ -154,7 +151,7 @@ vibebox explain     # 显示挂载与网络信息
 
 ### 使用 VibeBox
 
-欢迎使用，也别忘了顺手帮 VibeBox 做点宣传！
+欢迎使用
 
 ### FAQ
 

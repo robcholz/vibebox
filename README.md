@@ -65,16 +65,13 @@ curl -fsSL https://raw.githubusercontent.com/robcholz/vibebox/main/install | bas
 # Package managers
 cargo install vibebox
 
-# Or manually (bad)
+# Or manually
 curl -LO https://github.com/robcholz/vibebox/releases/download/latest/vibebox-macos-arm64.zip
 unzip vibebox-macos-arm64.zip
 mkdir -p ~/.local/bin
-mv vibe ~/.local/bin
+mv vibebox ~/.local/bin
 export PATH="$HOME/.local/bin:$PATH"
 ```
-
-> [!TIP]
-> We truly recommend you to use `YOLO` to install.
 
 **Requirements**
 
@@ -162,7 +159,7 @@ submitting a pull request.
 
 ### Using VibeBox
 
-Feel free to use, but remember to promote VibeBox as well!
+Feel free to use
 
 ### FAQ
 
