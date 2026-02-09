@@ -5,7 +5,7 @@
     </picture>
   </a>
 </p>
-<p align="center">超高速、开源的 AI 沙盒。</p>
+<p align="center">用于安全运行 coding agents 的超高速开源沙盒。</p>
 
 <p align="center">
   <a href="https://crates.io/crates/vibebox">
@@ -24,8 +24,34 @@
   <a href="README.md">English</a>
 </p>
 
-VibeBox 是一个轻量、启动极快的沙盒环境，让 AI Agent 可以安全地直接跑命令、改文件、执行代码，不会不停弹“要不要允许”的提示。它基于
-Apple 的 Virtualization Framework 做到彻底隔离，所以无论 Agent 在里面怎么折腾，你的真实系统都不会被影响；同时做到了低内存和磁盘占用。
+**VibeBox 是一个按项目划分的 micro-VM 沙盒，用于在 macOS 上运行 coding agents（基于 Apple Virtualization Framework）。**
+它面向 *日常使用* 工作流优化：快速热启动、显式挂载、可复用会话。
+
+**适合谁：** 在 macOS 上使用 coding agents，并且既想要真实隔离又不想牺牲日常效率的人。
+
+**快速事实：** 在我的 M3 上，热启动通常 **<5s**（因机器/缓存而异）；首次运行会下载并初始化 Debian 基础镜像（受网络影响）。
+
+**安全模型：** Linux 来宾 VM + `vibebox.toml` 显式挂载白名单（默认仅项目目录，其它均需显式允许）。
+
+- **几秒进入/附加：** `vibebox` 直接进入当前仓库的可复用沙盒
+- **默认按项目范围：** 显式挂载 + 改动限制在仓库内（repo 优先，其他需 allowlist）
+- **会话化：** 多实例 + 会话管理（复用、多终端、清理）
+
+### 快速演示
+
+```bash
+# 在任意仓库内
+cd my-project
+vibebox
+```
+
+你大致会看到：
+
+```text
+vibebox: starting (session: my-project)
+vibebox: attaching...
+vibecoder@vibebox:~/my-project$
+```
 
 [![VibeBox Terminal UI](docs/screenshot.png)](https://vibebox.robcholz.com)
 
@@ -33,22 +59,33 @@ Apple 的 Virtualization Framework 做到彻底隔离，所以无论 Agent 在�
 
 ### 我为什么做 VibeBox
 
-我平时经常用像 Codex 和 CC 这样的
-agent，但一直不太敢让它们直接在我的宿主机上跑。把权限收紧一点，就会被各种“你确定吗？”的确认弹窗不停打断；放松一点，又担心它哪天误操作，碰到不该碰的文件，或者跑了我没打算执行的命令。
+我每天都在用 coding agents，也希望它们有一个真实的 shell，但不想把宿主机直接交出去。
+权限收紧会被不停的确认打断；权限放开又担心误删文件、触及密钥，或者跑出仓库边界。
 
-我想要的是一种体验：像给 agent 一个真实 shell 一样顺滑，但同时又有一道硬隔离的安全边界。于是我做了 VibeBox：一个按项目划分的
-micro-VM 沙箱，启动很快，改动被限制在仓库范围内，让我可以更高频地迭代，而不用一直盯着权限确认。
+VibeBox 是中间方案：按项目隔离、硬 VM 边界、快速回到工作状态、显式挂载。它适合把 agent 当成日常工具，而不是把安全变成负担。
+
+### 为什么是 micro-VM（而不是容器）？
+
+容器很好用。VibeBox 并不是用来替代 Docker/devcontainers 去构建服务。
+
+我更想要的是在 macOS 上适合 agent 的 VM 默认形态：
+
+- **默认是 guest-kernel 隔离边界：** 让 agent 跑任意命令时，“安全模式”是 Linux 来宾而不是宿主机。
+- **会话是第一等公民：** 按项目附加/复用，多终端进入同一沙盒，可靠清理，避免孤儿环境。
+- **显式挂载白名单作为主要 UX：** 默认仅项目目录，其它都需显式允许。
+- **最少的每项目配置：** 你可以用 compose/devcontainers 实现一部分，但我想要的是一个命令，在不同仓库间直接工作，不必维护容器配置来获得基础“安全
+  shell”体验。
 
 ### 对比
 
 下面是我为什么没有直接用现成方案的原因：
 
-- **vibe**：非常方便，但对我来说太“极简”了。它缺少一些基础配置能力，也没法提供我工作流里需要的多开和 session 管理。
+- **vibe**：非常方便，“零配置、直接用”做得很好。但 VibeBox 走的是另一条路：按项目配置 + 会话 + 多实例生命周期。
 - **QEMU**：很强大，但配置面太大了。日常当沙箱用，它不像是“进到 repo 就能用”，更像是你得先把它当成一个项目来折腾。
-- **Docker / devcontainers**：生态很成熟，但日常使用对我来说偏重。
+- **Docker / devcontainers / devpods**：生态很成熟。我的痛点不在启动时间，而是日常保持
+  safe-by-default（挂载白名单、密钥暴露、附加/复用、清理）的开销，不想为基础 workflow 在每个项目维护容器配置。
 
-这些就促使我做了 **VibeBox**：我想要一个按项目隔离的沙箱，进入速度快（直接用 `vibebox`），支持真正可用的配置和
-sessions，同时还保留明确的硬隔离边界。
+这就是我做 **VibeBox** 的原因：我想要一个按项目隔离的沙箱，进入快（直接 `vibebox`），支持真实配置 + 会话，同时保持硬隔离边界。
 
 ### 安装
 
@@ -149,19 +186,16 @@ vibebox explain     # 显示挂载与网络信息
 
 如果你想参与贡献 VibeBox，请先阅读 [贡献指南](CONTRIBUTING.md)，再提交 Pull Request。
 
-### 使用 VibeBox
-
-欢迎使用
-
 ### FAQ
 
 #### 它和其它 Sandboxes 有什么不同？
 
-Vibebox 追求的是：本地、可复现、启动快、流程简单。主要差异点：
+VibeBox 追求的是：本地、可复现、启动快、流程简单。主要差异点：
 
-- 在我的 M3 上，热启动通常 **6 秒以内**，可以非常快地回到工作状态。
+- 在我的 M3 上，热启动通常 **<5s**，可以非常快地回到工作状态。
 - 一个命令——`vibebox`——直接把你带进沙盒（从你的项目目录启动）。
 - 配置集中在 `vibebox.toml`，CPU / 内存 / 磁盘大小 / 挂载都能一眼看懂、随手改。
+- 会话是第一等公民：复用、多终端、清理。
 
 ### 特别鸣谢
 
