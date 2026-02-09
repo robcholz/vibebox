@@ -64,3 +64,4 @@
 3. [ ] Redirect vm output to log.
 4. [ ] Redirect vm output to vibebox starting it.
 5. [ ] use anyhow to sync api.
+6. [ ] add support for ipv6.

@@ -30,7 +30,21 @@ use crate::{
 
 const VM_MANAGER_LOCK_NAME: &str = "vm.lock";
 const VM_MANAGER_LOG_NAME: &str = "vm_manager.log";
+const SHUTDOWN_RETRY_MS: u64 = 500;
+#[cfg(test)]
+const HARD_SHUTDOWN_TIMEOUT_MS: u64 = 1_000;
+#[cfg(not(test))]
 const HARD_SHUTDOWN_TIMEOUT_MS: u64 = 12_000;
+
+#[cfg(not(test))]
+fn force_exit(_reason: &str) -> ! {
+    std::process::exit(1);
+}
+
+#[cfg(test)]
+fn force_exit(reason: &str) -> ! {
+    panic!("{reason}");
+}
 
 pub fn ensure_manager(
     raw_args: &[std::ffi::OsString],
@@ -782,9 +796,14 @@ fn manager_event_loop(
     let hard_timeout = Duration::from_millis(HARD_SHUTDOWN_TIMEOUT_MS);
 
     loop {
-        let timeout = match shutdown_deadline {
-            Some(deadline) => deadline.saturating_duration_since(Instant::now()),
-            None => Duration::from_secs(1),
+        let timeout = match (shutdown_deadline, hard_deadline) {
+            (Some(shutdown), Some(hard)) => {
+                let next = if shutdown <= hard { shutdown } else { hard };
+                next.saturating_duration_since(Instant::now())
+            }
+            (Some(shutdown), None) => shutdown.saturating_duration_since(Instant::now()),
+            (None, Some(hard)) => hard.saturating_duration_since(Instant::now()),
+            (None, None) => Duration::from_secs(1),
         };
 
         match event_rx.recv_timeout(timeout) {
@@ -824,6 +843,9 @@ fn manager_event_loop(
                     && Instant::now() >= deadline
                     && !shutdown_sent
                 {
+                    if hard_deadline.is_none() {
+                        hard_deadline = Some(Instant::now() + hard_timeout);
+                    }
                     let mut sent = false;
                     if let Some(tx) = vm_input_tx.lock().unwrap().clone() {
                         if tx
@@ -843,19 +865,26 @@ fn manager_event_loop(
                         shutdown_deadline = None;
                         hard_deadline = Some(Instant::now() + hard_timeout);
                     } else {
-                        shutdown_deadline = Some(Instant::now() + Duration::from_millis(500));
+                        shutdown_deadline =
+                            Some(Instant::now() + Duration::from_millis(SHUTDOWN_RETRY_MS));
                     }
                 }
                 if ref_count == 0
-                    && shutdown_sent
                     && let Some(deadline) = hard_deadline
                     && Instant::now() >= deadline
                 {
-                    tracing::warn!(
-                        timeout_ms = HARD_SHUTDOWN_TIMEOUT_MS,
-                        "force exiting: VM did not stop after shutdown timeout"
-                    );
-                    std::process::exit(1);
+                    if shutdown_sent {
+                        tracing::warn!(
+                            timeout_ms = HARD_SHUTDOWN_TIMEOUT_MS,
+                            "force exiting: VM did not stop after shutdown timeout"
+                        );
+                    } else {
+                        tracing::warn!(
+                            timeout_ms = HARD_SHUTDOWN_TIMEOUT_MS,
+                            "force exiting: VM input not ready after shutdown timeout"
+                        );
+                    }
+                    force_exit("vm manager forced exit");
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -868,7 +897,7 @@ fn manager_event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::mpsc, time::Duration};
+    use std::{sync::mpsc, thread, time::Duration};
 
     #[test]
     fn manager_powers_off_after_grace_when_no_refs() {
@@ -889,6 +918,55 @@ mod tests {
         assert!(vm_rx.recv_timeout(Duration::from_millis(100)).is_err());
 
         event_tx.send(ManagerEvent::Dec(None)).unwrap();
+        let msg = vm_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("poweroff");
+        match msg {
+            VmInput::Bytes(data) => {
+                assert_eq!(data, b"systemctl poweroff\n");
+            }
+            _ => panic!("unexpected vm input"),
+        }
+        let _ = event_tx.send(ManagerEvent::VmExited(None));
+        let _ = manager_thread.join();
+    }
+
+    #[test]
+    fn manager_force_exits_when_vm_input_never_ready() {
+        let (event_tx, event_rx) = mpsc::channel::<ManagerEvent>();
+        let vm_input_tx = Arc::new(Mutex::new(None));
+
+        let manager_thread = thread::spawn(move || {
+            let _ = manager_event_loop(event_rx, vm_input_tx, 10);
+        });
+
+        event_tx.send(ManagerEvent::Inc(None)).unwrap();
+        event_tx.send(ManagerEvent::Dec(None)).unwrap();
+
+        let join_result = manager_thread.join();
+        assert!(
+            join_result.is_err(),
+            "expected manager to force-exit when vm input never becomes ready"
+        );
+    }
+
+    #[test]
+    fn manager_sends_shutdown_after_vm_input_becomes_ready() {
+        let (event_tx, event_rx) = mpsc::channel::<ManagerEvent>();
+        let (vm_tx, vm_rx) = mpsc::channel::<VmInput>();
+        let vm_input_tx = Arc::new(Mutex::new(None));
+        let vm_input_for_thread = vm_input_tx.clone();
+
+        let manager_thread = thread::spawn(move || {
+            manager_event_loop(event_rx, vm_input_for_thread, 10).expect("event loop");
+        });
+
+        event_tx.send(ManagerEvent::Inc(None)).unwrap();
+        event_tx.send(ManagerEvent::Dec(None)).unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+        *vm_input_tx.lock().unwrap() = Some(vm_tx);
+
         let msg = vm_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("poweroff");
