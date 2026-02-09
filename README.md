@@ -24,8 +24,20 @@
   <a href="README.zh.md">简体中文</a>
 </p>
 
-VibeBox is a lightweight, ultra-fast sandbox for AI agents to run commands, edit files, and execute code inside an
-isolated Apple Virtualization Framework micro-VM, no repeated permission prompts, minimal memory/disk overhead.
+**VibeBox is a per-project micro-VM sandbox for coding agents on macOS (Apple Virtualization Framework), fast to enter,
+configurable, and built around sessions.**
+
+- **Enter in seconds:** `vibebox` drops you into a reusable sandbox for the current repo
+- **Project-scoped:** explicit mounts + repo-contained changes
+- **Sessioned:** multi-instance + session management (reuse, multiple terminals, cleanup)
+
+### Quick Demo
+
+```bash
+# 1) from any repo
+cd my-project
+vibebox
+```
 
 [![VibeBox Terminal UI](docs/screenshot.png)](https://vibebox.robcholz.com)
 
