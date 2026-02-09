@@ -209,8 +209,10 @@ where
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
 
     let instance_dir = project_root.join(INSTANCE_DIR_NAME);
+    fs::create_dir_all(&instance_dir)?;
     let status_file = StatusFile::new(instance_dir.join(STATUS_FILE_NAME));
     status_file.update("preparing VM image...");
+    let provision_log = instance_dir.join("provision.log");
 
     let basename_compressed = DEBIAN_COMPRESSED_DISK_URL.rsplit('/').next().unwrap();
     let base_compressed = cache_dir.join(basename_compressed);
@@ -235,6 +237,7 @@ where
         &default_raw,
         std::slice::from_ref(&mise_directory_share),
         Some(&status_file),
+        Some(&provision_log),
     )?;
     let _ = ensure_instance_disk(
         &instance_raw,
@@ -583,6 +586,7 @@ fn ensure_default_image(
     default_raw: &Path,
     directory_shares: &[DirectoryShare],
     status: Option<&StatusFile>,
+    provision_log: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if default_raw.exists() {
         return Ok(());
@@ -605,14 +609,31 @@ fn ensure_default_image(
             timeout: PROVISION_EXPECT_TIMEOUT,
         },
     ];
-    if let Err(err) = run_vm(
-        default_raw,
-        &provision_actions,
-        directory_shares,
-        DEFAULT_CPU_COUNT,
-        DEFAULT_RAM_BYTES,
-        None,
-    ) {
+    let provision_result = if let Some(log_path) = provision_log {
+        let log_path = log_path.to_path_buf();
+        run_vm_with_io(
+            default_raw,
+            &provision_actions,
+            directory_shares,
+            DEFAULT_CPU_COUNT,
+            DEFAULT_RAM_BYTES,
+            None,
+            move |output_monitor, vm_output_fd, vm_input_fd| {
+                spawn_vm_io_with_log(output_monitor, vm_output_fd, vm_input_fd, log_path)
+            },
+        )
+    } else {
+        run_vm(
+            default_raw,
+            &provision_actions,
+            directory_shares,
+            DEFAULT_CPU_COUNT,
+            DEFAULT_RAM_BYTES,
+            None,
+        )
+    };
+
+    if let Err(err) = provision_result {
         let _ = fs::remove_file(default_raw);
         return Err(err);
     }
@@ -913,6 +934,36 @@ pub fn spawn_vm_io(
     vm_input_fd: OwnedFd,
 ) -> IoContext {
     spawn_vm_io_with_line_handler(output_monitor, vm_output_fd, vm_input_fd, |_| false)
+}
+
+fn spawn_vm_io_with_log(
+    output_monitor: Arc<OutputMonitor>,
+    vm_output_fd: OwnedFd,
+    vm_input_fd: OwnedFd,
+    log_path: PathBuf,
+) -> IoContext {
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)
+        .ok()
+        .map(|file| Arc::new(Mutex::new(file)));
+
+    spawn_vm_io_with_hooks(
+        output_monitor,
+        vm_output_fd,
+        vm_input_fd,
+        IoControl::new(),
+        |_| false,
+        move |bytes| {
+            if let Some(log) = &log_file
+                && let Ok(mut file) = log.lock()
+            {
+                let _ = file.write_all(bytes);
+            }
+        },
+    )
 }
 
 impl IoContext {

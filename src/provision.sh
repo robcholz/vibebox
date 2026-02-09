@@ -1,7 +1,7 @@
 #!/bin/bash
 set -eEux
 
-trap 'rc=$?; echo "[vibebox][error] provisioning failed at: ${BASH_COMMAND} (exit ${rc})"; echo "VIBEBOX_PROVISION_FAILED"; systemctl poweroff || true; exit 1' ERR
+trap 'rc=$?; echo "[vibebox][error] provisioning failed at: ${BASH_COMMAND} (exit ${rc})"; printf "%s%s\n" VIBEBOX_PROVISION_ FAILED; systemctl poweroff || true; exit 1' ERR
 
 # Wait for network + DNS before apt-get to avoid early boot flakiness.
 wait_for_network() {
@@ -98,5 +98,5 @@ sleep 100 # sleep here so that we don't see the login screen flash up before the
 EOF
 
 # Done provisioning, power off the VM
-echo "VIBEBOX_PROVISION_OK"
+printf "%s%s\n" VIBEBOX_PROVISION_ OK
 systemctl poweroff
