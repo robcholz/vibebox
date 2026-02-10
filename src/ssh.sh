@@ -2,6 +2,7 @@
 set -eu
 
 SSH_USER="__SSH_USER__"
+SUDO_PASSWORD="__SUDO_PASSWORD__"
 PROJECT_NAME="__PROJECT_NAME__"
 PROJECT_GUEST_DIR="__PROJECT_GUEST_DIR__"
 KEY_PATH="__KEY_PATH__"
@@ -59,6 +60,10 @@ fi
 if ! id -u "$SSH_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash -U "$SSH_USER"
   usermod -aG sudo "$SSH_USER" || true
+fi
+
+if [ -n "$SUDO_PASSWORD" ]; then
+  echo "${SSH_USER}:${SUDO_PASSWORD}" | chpasswd
 fi
 
 install -d -m 700 -o "$SSH_USER" -g "$SSH_USER" "/home/${SSH_USER}/.ssh"

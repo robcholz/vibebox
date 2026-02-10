@@ -1303,7 +1303,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vibebox"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "assert_cmd",
  "block2",
