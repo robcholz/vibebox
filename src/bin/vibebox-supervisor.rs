@@ -22,7 +22,8 @@ fn main() -> Result<()> {
 
     tracing::info!("starting vm supervisor");
     let cwd = env::current_dir().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
-    let config = config::load_config(&cwd);
+    let config =
+        config::load_config(&cwd).map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
     let instance_dir = instance::ensure_instance_dir(&cwd)
         .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
     let _ = instance::touch_last_active(&instance_dir);

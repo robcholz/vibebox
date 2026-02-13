@@ -57,7 +57,8 @@ fn main() -> Result<()> {
 
     let config_override = cli.config.clone();
     let raw_args: Vec<OsString> = env::args_os().collect();
-    let config = config::load_config_with_path(&cwd, config_override.as_deref());
+    let config = config::load_config_with_path(&cwd, config_override.as_deref())
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
 
     let vm_info = VmInfo {
         max_memory: config.box_cfg.ram_size,
@@ -193,7 +194,8 @@ fn handle_command(command: Command, cwd: &Path, config_override: Option<&Path>) 
             Ok(())
         }
         Command::Explain => {
-            let config = config::load_config_with_path(cwd, config_override);
+            let config = config::load_config_with_path(cwd, config_override)
+                .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
             let mounts = explain::build_mount_rows(cwd, &config)
                 .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
             let networks = explain::build_network_rows(cwd)
