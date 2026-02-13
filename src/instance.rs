@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
     io::{self},
@@ -9,8 +10,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
@@ -187,13 +186,18 @@ pub fn read_instance_vm_ip(
     Ok(config.and_then(|cfg| cfg.vm_ipv4))
 }
 
-pub fn read_instance_ssh_user(
-    instance_dir: &Path,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let config = read_instance_config(instance_dir)?;
-    Ok(config
-        .map(|cfg| cfg.ssh_user)
-        .filter(|user| !user.trim().is_empty()))
+pub fn read_instance_ssh_user(instance_dir: &Path) -> String {
+    let config = read_instance_config(instance_dir);
+    match config {
+        Ok(cfg) => match cfg {
+            None => {
+                tracing::warn!("no instance config found, falling back to default");
+                DEFAULT_SSH_USER.into()
+            }
+            Some(cfg) => cfg.ssh_user,
+        },
+        Err(_) => DEFAULT_SSH_USER.into(),
+    }
 }
 
 pub fn touch_last_active(instance_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {

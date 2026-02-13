@@ -1,28 +1,23 @@
-use std::{
-    env,
-    error::Error,
-    path::{Path, PathBuf},
-};
-
 use crate::utils::relative_to_home;
 use crate::{config, instance, session_manager, tui};
+use anyhow::{Context, Result, bail};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
+use tracing::warn;
 
-pub fn build_mount_rows(
-    cwd: &Path,
-    config: &config::Config,
-) -> Result<Vec<tui::MountListRow>, Box<dyn Error + Send + Sync>> {
+pub fn build_mount_rows(cwd: &Path, config: &config::Config) -> Result<Vec<tui::MountListRow>> {
     let mut rows = Vec::new();
     rows.extend(default_mounts(cwd)?);
-    let guest_home = resolve_guest_home(cwd)?;
+    let guest_home = resolve_guest_home(cwd);
     for spec in &config.box_cfg.mounts {
         rows.push(parse_mount_spec(cwd, spec, false, &guest_home)?);
     }
     Ok(rows)
 }
 
-pub fn build_network_rows(
-    cwd: &Path,
-) -> Result<Vec<tui::NetworkListRow>, Box<dyn Error + Send + Sync>> {
+pub fn build_network_rows(cwd: &Path) -> Result<Vec<tui::NetworkListRow>> {
     let instance_dir = cwd.join(session_manager::INSTANCE_DIR_NAME);
     let mut vm_ip = "-".to_string();
     if let Ok(Some(ip)) = instance::read_instance_vm_ip(&instance_dir) {
@@ -42,11 +37,11 @@ pub fn build_network_rows(
     Ok(vec![row])
 }
 
-fn default_mounts(cwd: &Path) -> Result<Vec<tui::MountListRow>, Box<dyn Error + Send + Sync>> {
+fn default_mounts(cwd: &Path) -> Result<Vec<tui::MountListRow>> {
     let project_name = cwd
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("project");
+        .with_context(|| "failed to get project name")?;
     let project_guest = format!("~/{project_name}");
     let project_host = relative_to_home(cwd);
     let mut rows = vec![tui::MountListRow {
@@ -58,10 +53,13 @@ fn default_mounts(cwd: &Path) -> Result<Vec<tui::MountListRow>, Box<dyn Error + 
 
     let home = env::var("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/"));
+        .with_context(|| "failed to get home directory")?;
     let cache_home = env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".cache"));
+        .unwrap_or_else(|_| {
+            warn!("failed to get XDG_CACHE_HOME, falling back to ~/.cache");
+            home.join(".cache")
+        });
     let cache_dir = cache_home.join(session_manager::GLOBAL_CACHE_DIR_NAME);
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
     rows.push(tui::MountListRow {
@@ -78,10 +76,10 @@ fn parse_mount_spec(
     spec: &str,
     default_mount: bool,
     guest_home: &str,
-) -> Result<tui::MountListRow, Box<dyn Error + Send + Sync>> {
+) -> Result<tui::MountListRow> {
     let parts: Vec<&str> = spec.split(':').collect();
     if parts.len() < 2 || parts.len() > 3 {
-        return Err(format!("invalid mount spec: {spec}").into());
+        bail!["invalid mount spec: {spec}"];
     }
     let host_part = parts[0];
     let guest_part = parts[1];
@@ -90,11 +88,10 @@ fn parse_mount_spec(
             "read-only" => "read-only",
             "read-write" => "read-write",
             other => {
-                return Err(format!(
+                bail![format!(
                     "invalid mount mode '{}'; expected read-only or read-write",
                     other
-                )
-                .into());
+                )];
             }
         }
     } else {
@@ -127,12 +124,9 @@ fn display_host_spec(cwd: &Path, host: &str) -> String {
     }
 }
 
-fn resolve_guest_home(cwd: &Path) -> Result<String, Box<dyn Error + Send + Sync>> {
+fn resolve_guest_home(cwd: &Path) -> String {
     let instance_dir = cwd.join(session_manager::INSTANCE_DIR_NAME);
-    if let Ok(Some(user)) = instance::read_instance_ssh_user(&instance_dir) {
-        return Ok(format!("/home/{user}"));
-    }
-    Ok(format!("/home/{}", instance::DEFAULT_SSH_USER))
+    format!("/home/{}", instance::read_instance_ssh_user(&instance_dir))
 }
 
 fn resolve_guest_display(guest: &str, guest_home: &str) -> String {
