@@ -53,15 +53,17 @@
 
 ## Publish
 
-1. [ ] write the docs.
-2. [ ] setup quick install link.
-3. [ ] setup website.
+1. [x] write the docs.
+2. [x] setup quick install link.
+3. [x] setup website.
 
 ## Stage 2
 
 1. [ ] retouch the cli ux.
 2. [ ] refactor the code.
-3. [ ] Redirect vm output to log.
-4. [ ] Redirect vm output to vibebox starting it.
-5. [ ] use anyhow to sync api.
-6. [ ] add support for ipv6.
+3. [ ] refactor the mount system.
+4. [ ] refactor the vm process 
+5. [ ] Redirect vm output to log.
+6. [ ] Redirect vm output to vibebox starting it.
+7. [ ] use anyhow to sync api.
+8. [ ] add support for ipv6.

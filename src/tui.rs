@@ -1,10 +1,4 @@
-use std::{
-    io::{self, Write},
-    os::unix::io::OwnedFd,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
-
+use bytesize::ByteSize;
 use color_eyre::Result;
 use crossterm::{
     cursor::{MoveTo, Show},
@@ -21,6 +15,12 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Widget},
+};
+use std::{
+    io::{self, Write},
+    os::unix::io::OwnedFd,
+    path::PathBuf,
+    sync::{Arc, Mutex},
 };
 
 use crate::vm;
@@ -39,9 +39,9 @@ const INFO_LINE_COUNT: u16 = 5;
 
 #[derive(Debug, Clone)]
 pub struct VmInfo {
-    pub max_memory_mb: u64,
+    pub max_memory: ByteSize,
     pub cpu_cores: usize,
-    pub max_disk_gb: f32,
+    pub max_disk: ByteSize,
     pub system_name: String,
     pub auto_shutdown_ms: u64,
 }
@@ -574,8 +574,8 @@ fn render_header(buffer: &mut Buffer, area: Rect, app: &AppState) {
             Span::raw("CPU / Memory / Disk: "),
             Span::styled(
                 format!(
-                    "{} cores / {} MB / {} GB",
-                    app.vm_info.cpu_cores, app.vm_info.max_memory_mb, app.vm_info.max_disk_gb
+                    "{} cores / {} / {}",
+                    app.vm_info.cpu_cores, app.vm_info.max_memory, app.vm_info.max_disk
                 ),
                 Style::default().fg(Color::Green),
             ),

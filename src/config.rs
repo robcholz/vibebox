@@ -1,13 +1,13 @@
+use bytesize::ByteSize;
+use serde::{Deserialize, Serialize};
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
-
 use crate::vm::DirectoryShare;
 
-pub const CONFIG_FILENAME: &str = "vibebox.toml";
+const CONFIG_FILENAME: &str = "vibebox.toml";
 pub const CONFIG_PATH_ENV: &str = "VIBEBOX_CONFIG_PATH";
 
 const DEFAULT_CPU_COUNT: usize = 2;
@@ -22,20 +22,83 @@ pub struct Config {
     pub supervisor: SupervisorConfig,
 }
 
+const MI_B: u64 = 1024 * 1024;
+const GI_B: u64 = 1024 * 1024 * 1024;
+
+mod serde_mb {
+    use super::{ByteSize, MI_B};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(v: &ByteSize, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes = v.0;
+        if !bytes.is_multiple_of(MI_B) {
+            return Err(serde::ser::Error::custom(
+                "ram_mb must be an integer number of MB",
+            ));
+        }
+        s.serialize_u64(bytes / MI_B)
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<ByteSize, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mb = u64::deserialize(d)?;
+        let bytes = mb
+            .checked_mul(MI_B)
+            .ok_or_else(|| serde::de::Error::custom("ram_mb overflow"))?;
+        Ok(ByteSize(bytes))
+    }
+}
+
+mod serde_gb {
+    use super::{ByteSize, GI_B};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(v: &ByteSize, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes = v.0;
+        if !bytes.is_multiple_of(GI_B) {
+            return Err(serde::ser::Error::custom(
+                "disk_gb must be an integer number of GB",
+            ));
+        }
+        s.serialize_u64(bytes / GI_B)
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<ByteSize, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let gb = u64::deserialize(d)?;
+        let bytes = gb
+            .checked_mul(GI_B)
+            .ok_or_else(|| serde::de::Error::custom("disk_gb overflow"))?;
+        Ok(ByteSize(bytes))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxConfig {
     pub cpu_count: usize,
-    pub ram_mb: u64,
-    pub disk_gb: u64,
+    #[serde(rename = "ram_mb", with = "serde_mb")]
+    pub ram_size: ByteSize,
+    #[serde(rename = "disk_gb", with = "serde_gb")]
+    pub disk_size: ByteSize,
     pub mounts: Vec<String>,
 }
 
 impl Default for BoxConfig {
     fn default() -> Self {
         Self {
-            cpu_count: default_cpu_count(),
-            ram_mb: default_ram_mb(),
-            disk_gb: default_disk_gb(),
+            cpu_count: DEFAULT_CPU_COUNT,
+            ram_size: ByteSize::mib(DEFAULT_RAM_MB),
+            disk_size: ByteSize::gib(DEFAULT_DISK_GB),
             mounts: default_mounts(),
         }
     }
@@ -49,21 +112,9 @@ pub struct SupervisorConfig {
 impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
-            auto_shutdown_ms: default_auto_shutdown_ms(),
+            auto_shutdown_ms: DEFAULT_AUTO_SHUTDOWN_MS,
         }
     }
-}
-
-fn default_cpu_count() -> usize {
-    DEFAULT_CPU_COUNT
-}
-
-fn default_ram_mb() -> u64 {
-    DEFAULT_RAM_MB
-}
-
-fn default_auto_shutdown_ms() -> u64 {
-    DEFAULT_AUTO_SHUTDOWN_MS
 }
 
 fn default_mounts() -> Vec<String> {
@@ -71,10 +122,6 @@ fn default_mounts() -> Vec<String> {
         "~/.codex:~/.codex:read-write".into(),
         "~/.claude:~/.claude:read-write".into(),
     ]
-}
-
-fn default_disk_gb() -> u64 {
-    DEFAULT_DISK_GB
 }
 
 pub fn config_path(project_root: &Path) -> PathBuf {
@@ -267,10 +314,10 @@ fn validate_or_exit(config: &Config) {
     if config.box_cfg.cpu_count == 0 {
         die("box.cpu_count must be >= 1");
     }
-    if config.box_cfg.ram_mb == 0 {
+    if config.box_cfg.ram_size.as_mib() == 0.0 {
         die("box.ram_mb must be >= 1");
     }
-    if config.box_cfg.disk_gb == 0 {
+    if config.box_cfg.disk_size.as_gib() == 0.0 {
         die("box.disk_gb must be >= 1");
     }
     if config.supervisor.auto_shutdown_ms == 0 {

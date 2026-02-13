@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::utils::relative_to_home;
 use crate::{config, instance, session_manager, tui};
 
 pub fn build_mount_rows(
@@ -47,7 +48,7 @@ fn default_mounts(cwd: &Path) -> Result<Vec<tui::MountListRow>, Box<dyn Error + 
         .and_then(|name| name.to_str())
         .unwrap_or("project");
     let project_guest = format!("~/{project_name}");
-    let project_host = display_path(cwd);
+    let project_host = relative_to_home(cwd);
     let mut rows = vec![tui::MountListRow {
         host: project_host,
         guest: project_guest,
@@ -64,7 +65,7 @@ fn default_mounts(cwd: &Path) -> Result<Vec<tui::MountListRow>, Box<dyn Error + 
     let cache_dir = cache_home.join(session_manager::GLOBAL_CACHE_DIR_NAME);
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
     rows.push(tui::MountListRow {
-        host: display_path(&guest_mise_cache),
+        host: relative_to_home(&guest_mise_cache),
         guest: "/root/.local/share/mise".to_string(),
         mode: "read-write".to_string(),
         default_mount: "yes".to_string(),
@@ -116,11 +117,11 @@ fn display_host_spec(cwd: &Path, host: &str) -> String {
     }
     let host_path = PathBuf::from(host);
     if host_path.is_absolute() {
-        return display_path(&host_path);
+        return relative_to_home(&host_path);
     }
     let candidate = cwd.join(&host_path);
     if candidate.is_absolute() {
-        display_path(&candidate)
+        relative_to_home(&candidate)
     } else {
         host.to_string()
     }
@@ -154,18 +155,4 @@ fn resolve_guest_display(guest: &str, guest_home: &str) -> String {
     } else {
         format!("/root/{guest}")
     }
-}
-
-fn display_path(path: &Path) -> String {
-    let Ok(home) = env::var("HOME") else {
-        return path.display().to_string();
-    };
-    let home_path = PathBuf::from(home);
-    if let Ok(stripped) = path.strip_prefix(&home_path) {
-        if stripped.components().next().is_none() {
-            return "~".to_string();
-        }
-        return format!("~/{}", stripped.display());
-    }
-    path.display().to_string()
 }

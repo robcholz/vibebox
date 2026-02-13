@@ -5,9 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::config::config_path;
+use crate::utils::pid_is_alive;
 use serde::{Deserialize, Serialize};
-
-use crate::config::CONFIG_FILENAME;
 
 pub const INSTANCE_DIR_NAME: &str = ".vibebox";
 pub const GLOBAL_CACHE_DIR_NAME: &str = "vibebox";
@@ -61,7 +61,7 @@ pub enum SessionError {
     #[error("Session directory does not exist: {0}")]
     MissingDirectory(PathBuf),
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error(transparent)]
     TomlDe(#[from] toml::de::Error),
     #[error(transparent)]
@@ -271,7 +271,7 @@ fn is_vibebox_dir(directory: &Path) -> bool {
     if !directory.is_absolute() {
         return false;
     }
-    directory.join(CONFIG_FILENAME).is_file()
+    config_path(directory).is_file()
 }
 
 fn is_session_active(directory: &Path) -> bool {
@@ -296,19 +296,6 @@ fn is_session_active(directory: &Path) -> bool {
 fn read_pid(path: &Path) -> Option<u32> {
     let content = fs::read_to_string(path).ok()?;
     content.trim().parse::<u32>().ok()
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    let pid = pid as libc::pid_t;
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-    match std::io::Error::last_os_error().raw_os_error() {
-        Some(code) if code == libc::EPERM => true,
-        Some(code) if code == libc::ESRCH => false,
-        _ => false,
-    }
 }
 
 fn read_session_file(path: &Path) -> Result<SessionEntry, SessionError> {
@@ -387,7 +374,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         let project_dir = create_project_dir(&temp);
-        fs::write(project_dir.join(CONFIG_FILENAME), "").unwrap();
+        fs::write(config_path(project_dir.as_path()), "").unwrap();
         write_instance(
             &project_dir,
             "019bf290-cccc-7c23-ba1d-dce7e6d40693",
@@ -412,7 +399,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         let project_dir = create_project_dir(&temp);
-        fs::write(project_dir.join(CONFIG_FILENAME), "").unwrap();
+        fs::write(config_path(project_dir.as_path()), "").unwrap();
         write_instance(
             &project_dir,
             "019bf290-cccc-7c23-ba1d-dce7e6d40693",
@@ -420,7 +407,7 @@ mod tests {
         );
         let _ = mgr.update_global_sessions(&project_dir).unwrap();
 
-        fs::remove_file(project_dir.join(CONFIG_FILENAME)).unwrap();
+        fs::remove_file(config_path(project_dir.as_path())).unwrap();
         let sessions = mgr.list_sessions().unwrap();
         assert!(sessions.is_empty());
 
@@ -451,7 +438,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mgr = manager(&temp);
         let project_dir = create_project_dir(&temp);
-        fs::write(project_dir.join(CONFIG_FILENAME), "").unwrap();
+        fs::write(config_path(project_dir.as_path()), "").unwrap();
         write_instance(
             &project_dir,
             "019bf290-cccc-7c23-ba1d-dce7e6d40693",

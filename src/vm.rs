@@ -34,10 +34,6 @@ const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 280901576;
 const SHARED_DIRECTORIES_TAG: &str = "shared";
 pub const PROJECT_GUEST_BASE: &str = "/usr/local/vibebox-mounts";
 
-const BYTES_PER_MB: u64 = 1024 * 1024;
-const DEFAULT_CPU_COUNT: usize = 2;
-const DEFAULT_RAM_MB: u64 = 2048;
-const DEFAULT_RAM_BYTES: u64 = DEFAULT_RAM_MB * BYTES_PER_MB;
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVISION_EXPECT_TIMEOUT: Duration = Duration::from_secs(900);
@@ -88,6 +84,7 @@ pub(crate) enum LoginAction {
     },
     Send(String),
 }
+use crate::config::BoxConfig;
 use LoginAction::*;
 
 #[derive(Clone)]
@@ -511,7 +508,7 @@ fn ensure_base_image(
     }
 
     if !base_compressed.exists()
-        || std::fs::metadata(base_compressed).map(|m| m.len())? < DEBIAN_COMPRESSED_SIZE_BYTES
+        || fs::metadata(base_compressed).map(|m| m.len())? < DEBIAN_COMPRESSED_SIZE_BYTES
     {
         if let Some(status) = status {
             status.update("downloading base image...");
@@ -615,8 +612,8 @@ fn ensure_default_image(
             default_raw,
             &provision_actions,
             directory_shares,
-            DEFAULT_CPU_COUNT,
-            DEFAULT_RAM_BYTES,
+            BoxConfig::default().cpu_count,
+            BoxConfig::default().ram_size.as_u64(),
             None,
             move |output_monitor, vm_output_fd, vm_input_fd| {
                 spawn_vm_io_with_log(output_monitor, vm_output_fd, vm_input_fd, log_path)
@@ -627,8 +624,8 @@ fn ensure_default_image(
             default_raw,
             &provision_actions,
             directory_shares,
-            DEFAULT_CPU_COUNT,
-            DEFAULT_RAM_BYTES,
+            BoxConfig::default().cpu_count,
+            BoxConfig::default().ram_size.as_u64(),
             None,
         )
     };

@@ -6,7 +6,6 @@ use std::{
         fs::PermissionsExt,
         io::AsRawFd,
         net::{UnixListener, UnixStream},
-        process::CommandExt,
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -15,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::utils::pid_is_alive;
 use crate::{
     config::CONFIG_PATH_ENV,
     instance::STATUS_FILE_NAME,
@@ -160,21 +160,19 @@ fn spawn_manager_process(
     let exe = env::current_exe()?;
     let mut supervisor_exe = exe.clone();
     supervisor_exe.set_file_name("vibebox-supervisor");
-    let use_supervisor = supervisor_exe.exists();
-    let mut cmd = if use_supervisor {
-        Command::new(supervisor_exe)
-    } else {
-        let mut cmd = Command::new(exe);
-        cmd.arg0("vibebox-supervisor");
-        cmd
-    };
+    // intentional
+    if !supervisor_exe.exists() {
+        return Err(format!(
+            "vibebox-supervisor not found at {}",
+            supervisor_exe.display()
+        )
+        .into());
+    }
+    let mut cmd = Command::new(supervisor_exe);
     if raw_args.len() > 1 {
         cmd.args(&raw_args[1..]);
     }
     cmd.env("VIBEBOX_INTERNAL", "1");
-    if !use_supervisor {
-        cmd.env("VIBEBOX_VM_MANAGER", "1");
-    }
     cmd.env("VIBEBOX_LOG_NO_COLOR", "1");
     cmd.env("VIBEBOX_AUTO_SHUTDOWN_MS", auto_shutdown_ms.to_string());
     if let Some(path) = config_path {
@@ -449,19 +447,6 @@ fn is_lock_stale(lock_path: &Path) -> bool {
     match read_lock_pid(lock_path) {
         Some(pid) => !pid_is_alive(pid),
         None => true,
-    }
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    let pid = pid as libc::pid_t;
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-    match std::io::Error::last_os_error().raw_os_error() {
-        Some(code) if code == libc::EPERM => true,
-        Some(code) if code == libc::ESRCH => false,
-        _ => false,
     }
 }
 

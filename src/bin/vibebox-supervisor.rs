@@ -28,8 +28,8 @@ fn main() -> Result<()> {
     let _ = instance::touch_last_active(&instance_dir);
     let args = vm::VmArg {
         cpu_count: config.box_cfg.cpu_count,
-        ram_bytes: config.box_cfg.ram_mb.saturating_mul(1024 * 1024),
-        disk_bytes: config.box_cfg.disk_gb.saturating_mul(1024 * 1024 * 1024),
+        ram_bytes: config.box_cfg.ram_size.as_u64(),
+        disk_bytes: config.box_cfg.disk_size.as_u64(),
         no_default_mounts: false,
         mounts: config.box_cfg.mounts.clone(),
     };
