@@ -1,3 +1,4 @@
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
@@ -23,10 +24,14 @@ const SSH_KEY_NAME: &str = "ssh_key";
 #[cfg_attr(feature = "mock-vm", allow(dead_code))]
 pub(crate) const VM_ROOT_LOG_NAME: &str = "vm_root.log";
 pub(crate) const STATUS_FILE_NAME: &str = "status.txt";
-pub(crate) const DEFAULT_SSH_USER: &str = "vibecoder";
+const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
 const SSH_SETUP_SCRIPT: &str = include_str!("ssh.sh");
+
+fn default_ssh_user() -> String {
+    DEFAULT_SSH_USER.to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct InstanceConfig {
@@ -52,11 +57,7 @@ impl InstanceConfig {
     }
 }
 
-fn default_ssh_user() -> String {
-    DEFAULT_SSH_USER.to_string()
-}
-
-pub fn run_with_ssh(manager_conn: UnixStream) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_with_ssh(_: UnixStream) -> Result<()> {
     let project_root = env::current_dir()?;
     tracing::info!(root = %project_root.display(), "starting ssh session");
     let instance_dir = ensure_instance_dir(&project_root)?;
@@ -67,12 +68,11 @@ pub fn run_with_ssh(manager_conn: UnixStream) -> Result<(), Box<dyn std::error::
     let ssh_user = config.ssh_user.clone();
     tracing::debug!(ssh_user = %ssh_user, "loaded instance config");
 
-    let _manager_conn = manager_conn;
     wait_for_vm_ipv4(&instance_dir, Duration::from_secs(480))?;
 
     let ip = load_or_create_instance_config(&instance_dir)?
         .vm_ipv4
-        .ok_or("VM IPv4 not available")?;
+        .with_context(|| "failed to load instance IP address")?;
     tracing::info!(ip = %ip, "vm ipv4 ready");
 
     run_ssh_session(ssh_key, ssh_user, ip)
@@ -84,9 +84,7 @@ pub fn ensure_instance_dir(project_root: &Path) -> Result<PathBuf, io::Error> {
     Ok(instance_dir)
 }
 
-pub(crate) fn ensure_ssh_keypair(
-    instance_dir: &Path,
-) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+pub(crate) fn ensure_ssh_keypair(instance_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let private_key = instance_dir.join(SSH_KEY_NAME);
     let public_key = instance_dir.join(format!("{SSH_KEY_NAME}.pub"));
 
@@ -108,7 +106,9 @@ pub(crate) fn ensure_ssh_keypair(
             "-N",
             "",
             "-f",
-            private_key.to_str().ok_or("ssh key path not utf-8")?,
+            private_key
+                .to_str()
+                .with_context(|| "ssh key path not utf-8")?,
             "-C",
             "vibebox",
         ])
@@ -118,7 +118,7 @@ pub(crate) fn ensure_ssh_keypair(
         .status()?;
 
     if !status.success() {
-        return Err("ssh-keygen failed".into());
+        bail!("ssh-keygen failed");
     }
 
     fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600))?;
@@ -127,9 +127,7 @@ pub(crate) fn ensure_ssh_keypair(
     Ok((private_key, public_key))
 }
 
-pub(crate) fn load_or_create_instance_config(
-    instance_dir: &Path,
-) -> Result<InstanceConfig, Box<dyn std::error::Error>> {
+pub(crate) fn load_or_create_instance_config(instance_dir: &Path) -> Result<InstanceConfig> {
     let config_path = instance_dir.join(INSTANCE_FILENAME);
     let mut config = if config_path.exists() {
         let raw = fs::read_to_string(&config_path)?;
@@ -137,7 +135,7 @@ pub(crate) fn load_or_create_instance_config(
     } else {
         InstanceConfig {
             id: String::new(),
-            ssh_user: default_ssh_user(),
+            ssh_user: DEFAULT_SSH_USER.to_string(),
             sudo_password: String::new(),
             last_active: None,
             vm_ipv4: None,
@@ -146,7 +144,7 @@ pub(crate) fn load_or_create_instance_config(
 
     let mut changed = false;
     if config.ssh_user.trim().is_empty() {
-        config.ssh_user = default_ssh_user();
+        config.ssh_user = DEFAULT_SSH_USER.to_string();
         changed = true;
     }
 
@@ -167,9 +165,7 @@ pub(crate) fn load_or_create_instance_config(
     Ok(config)
 }
 
-fn read_instance_config(
-    instance_dir: &Path,
-) -> Result<Option<InstanceConfig>, Box<dyn std::error::Error>> {
+fn read_instance_config(instance_dir: &Path) -> Result<Option<InstanceConfig>> {
     let config_path = instance_dir.join(INSTANCE_FILENAME);
     if !config_path.exists() {
         return Ok(None);
@@ -179,14 +175,12 @@ fn read_instance_config(
     Ok(Some(config))
 }
 
-pub fn read_instance_vm_ip(
-    instance_dir: &Path,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub fn read_instance_vm_ip(instance_dir: &Path) -> Result<Option<String>> {
     let config = read_instance_config(instance_dir)?;
     Ok(config.and_then(|cfg| cfg.vm_ipv4))
 }
 
-pub fn read_instance_ssh_user(instance_dir: &Path) -> String {
+pub(crate) fn read_instance_ssh_user(instance_dir: &Path) -> String {
     let config = read_instance_config(instance_dir);
     match config {
         Ok(cfg) => match cfg {
@@ -200,7 +194,7 @@ pub fn read_instance_ssh_user(instance_dir: &Path) -> String {
     }
 }
 
-pub fn touch_last_active(instance_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn touch_last_active(instance_dir: &Path) -> Result<()> {
     let mut config = load_or_create_instance_config(instance_dir)?;
     let now = OffsetDateTime::now_utc().format(&Rfc3339)?;
     config.last_active = Some(now);
@@ -208,10 +202,7 @@ pub fn touch_last_active(instance_dir: &Path) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-pub(crate) fn write_instance_config(
-    path: &Path,
-    config: &InstanceConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn write_instance_config(path: &Path, config: &InstanceConfig) -> Result<()> {
     let data = toml::to_string_pretty(config)?;
     fs::write(path, data)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
@@ -242,10 +233,7 @@ pub(crate) fn extract_ipv4(line: &str) -> Option<String> {
     best
 }
 
-fn wait_for_vm_ipv4(
-    instance_dir: &Path,
-    timeout: Duration,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn wait_for_vm_ipv4(instance_dir: &Path, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     let mut next_log_at = start + Duration::from_secs(10);
     let mut next_status_check = start;
@@ -262,7 +250,7 @@ fn wait_for_vm_ipv4(
         }
         if start.elapsed() > timeout {
             let _ = fs::remove_file(&status_path);
-            return Err("Timed out waiting for VM IPv4".into());
+            bail!("Timed out waiting for VM IPv4");
         }
         let now = Instant::now();
         if now >= next_status_check {
@@ -273,7 +261,7 @@ fn wait_for_vm_ipv4(
                     if status.starts_with("error:") {
                         let _ = fs::remove_file(&status_path);
                         let message = status.trim_start_matches("error:").trim().to_string();
-                        return Err(message.into());
+                        bail!(message);
                     }
                     if !status.is_empty() && last_status.as_deref() != Some(status.as_str()) {
                         tracing::info!("[background]: {}", status);
@@ -304,11 +292,7 @@ fn wait_for_vm_ipv4(
     }
 }
 
-fn run_ssh_session(
-    ssh_key: PathBuf,
-    ssh_user: String,
-    ip: String,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_ssh_session(ssh_key: PathBuf, ssh_user: String, ip: String) -> Result<()> {
     let mut attempts = 0usize;
     loop {
         attempts += 1;
@@ -322,9 +306,7 @@ fn run_ssh_session(
                 SSH_CONNECT_RETRIES
             );
             if attempts >= SSH_CONNECT_RETRIES {
-                return Err(
-                    format!("ssh port not ready after {SSH_CONNECT_RETRIES} attempts").into(),
-                );
+                bail!("ssh port not ready after {SSH_CONNECT_RETRIES} attempts");
             }
             thread::sleep(Duration::from_millis(SSH_CONNECT_DELAY_MS));
             continue;
@@ -341,7 +323,7 @@ fn run_ssh_session(
         let status = Command::new("ssh")
             .args([
                 "-i",
-                ssh_key.to_str().unwrap_or(".vibebox/ssh_key"),
+                ssh_key.to_str().with_context(|| "invalid path")?,
                 "-o",
                 "IdentitiesOnly=yes",
                 "-o",
@@ -376,7 +358,7 @@ fn run_ssh_session(
             Ok(status) if status.code() == Some(255) => {
                 tracing::warn!(status = %status, "ssh connection failed");
                 if attempts >= SSH_CONNECT_RETRIES {
-                    return Err(format!("ssh failed after {SSH_CONNECT_RETRIES} attempts").into());
+                    bail!("ssh failed after {SSH_CONNECT_RETRIES} attempts");
                 }
                 thread::sleep(Duration::from_millis(500));
             }
@@ -386,7 +368,7 @@ fn run_ssh_session(
             }
             Err(err) => {
                 tracing::error!(error = %err, "failed to start ssh");
-                return Err(format!("failed to start ssh: {err}").into());
+                bail!("failed to start ssh: {err}");
             }
         }
     }
@@ -416,7 +398,7 @@ fn ssh_port_open(ip: &str) -> bool {
         Ok(addr) => addr,
         Err(_) => return false,
     };
-    TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)).is_ok()
+    TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
 }
 
 pub(crate) fn build_ssh_login_actions(

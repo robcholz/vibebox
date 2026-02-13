@@ -1,3 +1,18 @@
+use crate::utils::pid_is_alive;
+use crate::{
+    config::CONFIG_PATH_ENV,
+    instance::STATUS_FILE_NAME,
+    instance::VM_ROOT_LOG_NAME,
+    instance::{
+        InstanceConfig, build_ssh_login_actions, ensure_instance_dir, ensure_ssh_keypair,
+        extract_ipv4, load_or_create_instance_config, write_instance_config,
+    },
+    session_manager::{
+        GLOBAL_DIR_NAME, INSTANCE_FILENAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME,
+    },
+    vm::{self, DirectoryShare, LoginAction, PROJECT_GUEST_BASE, VmInput},
+};
+use anyhow::{Error, Result, anyhow, bail};
 use std::{
     env, fs,
     io::{Read, Write},
@@ -12,21 +27,6 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
-};
-
-use crate::utils::pid_is_alive;
-use crate::{
-    config::CONFIG_PATH_ENV,
-    instance::STATUS_FILE_NAME,
-    instance::VM_ROOT_LOG_NAME,
-    instance::{
-        DEFAULT_SSH_USER, InstanceConfig, build_ssh_login_actions, ensure_instance_dir,
-        ensure_ssh_keypair, extract_ipv4, load_or_create_instance_config, write_instance_config,
-    },
-    session_manager::{
-        GLOBAL_DIR_NAME, INSTANCE_FILENAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME,
-    },
-    vm::{self, DirectoryShare, LoginAction, PROJECT_GUEST_BASE, VmInput},
 };
 
 const VM_MANAGER_LOCK_NAME: &str = "vm.lock";
@@ -111,10 +111,7 @@ pub fn ensure_manager(
     }
 }
 
-pub fn run_manager(
-    args: vm::VmArg,
-    auto_shutdown_ms: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_manager(args: vm::VmArg, auto_shutdown_ms: u64) -> Result<()> {
     let project_root = env::current_dir()?;
     tracing::info!(root = %project_root.display(), "vm manager starting");
     let _pid_guard = ensure_pid_file(&project_root)?;
@@ -200,7 +197,7 @@ fn spawn_manager_process(
     Ok(())
 }
 
-fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard, Box<dyn std::error::Error>> {
+fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard> {
     let instance_dir = ensure_instance_dir(project_root)?;
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
@@ -209,7 +206,7 @@ fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard, Box<dyn std::err
         && pid_is_alive(pid)
     {
         if is_socket_path(&socket_path) {
-            return Err(format!("vm manager already running (pid {pid})").into());
+            bail!("vm manager already running (pid {pid})");
         }
         tracing::warn!(
             pid,
@@ -647,7 +644,7 @@ fn run_manager_with(
     auto_shutdown_ms: u64,
     executor: &dyn VmExecutor,
     options: ManagerOptions,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if options.ensure_signed {
         let _had_skip = env::var("VIBEBOX_SKIP_CODESIGN").ok();
         unsafe {
@@ -664,7 +661,7 @@ fn run_manager_with(
 
     let project_name = project_root
         .file_name()
-        .ok_or("Project directory has no name")?
+        .ok_or_else(|| anyhow!("Project directory has no name"))?
         .to_string_lossy()
         .into_owned();
     let instance_dir = ensure_instance_dir(project_root)?;
@@ -681,7 +678,7 @@ fn run_manager_with(
     let ssh_user = config
         .lock()
         .map(|cfg| cfg.ssh_user_display())
-        .unwrap_or_else(|_| DEFAULT_SSH_USER.to_string());
+        .map_err(|_| anyhow!("failed to acquire ssh user display"))?;
     if !args.no_default_mounts {
         inject_project_mount(&mut args.mounts, project_root, &ssh_user, &project_name);
     }
@@ -689,11 +686,10 @@ fn run_manager_with(
 
     let project_guest_dir = format!("{PROJECT_GUEST_BASE}/{project_name}");
     let ssh_guest_dir = format!("/root/{}", GLOBAL_DIR_NAME);
-    let extra_shares = vec![DirectoryShare::new(
-        instance_dir.clone(),
-        ssh_guest_dir.clone().into(),
-        true,
-    )?];
+    let extra_shares = vec![
+        DirectoryShare::new(instance_dir.clone(), ssh_guest_dir.clone().into(), true)
+            .map_err(|err| anyhow!(err.to_string()))?,
+    ];
     let extra_login_actions = build_ssh_login_actions(
         &config,
         &project_name,
@@ -756,21 +752,21 @@ fn run_manager_with(
         let _ = fs::write(&status_path, format!("error: {err}"));
     }
     let _ = event_tx.send(ManagerEvent::VmExited(vm_err.clone()));
-    let event_loop_result: Result<(), String> = event_loop_handle
+    let event_loop_result = event_loop_handle
         .join()
         .unwrap_or_else(|_| Err("vm manager event loop panicked".into()))
         .map_err(|err| err.to_string());
     let _ = fs::remove_file(&socket_path);
     if let Err(err) = &event_loop_result {
         tracing::error!(error = %err, "vm manager exiting due to event loop error");
-        return Err(err.to_string().into());
+        bail!(err.to_string());
     }
     if let Some(err) = vm_err {
         tracing::error!(error = %err, "vm manager exiting due to vm error");
-        return Err(err.into());
+        bail!(err);
     }
     tracing::info!("vm manager exiting");
-    Ok(event_loop_result?)
+    event_loop_result.map_err(Error::msg)
 }
 
 fn manager_event_loop(

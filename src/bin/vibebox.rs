@@ -188,7 +188,7 @@ fn handle_command(command: Command, cwd: &Path, config_override: Option<&Path>) 
                 "Purged {} file{} totaling {} from {}",
                 file_count,
                 if file_count == 1 { "" } else { "s" },
-                format_bytes(total_bytes),
+                ByteSize(total_bytes),
                 cache_dir.display()
             );
             Ok(())
@@ -264,23 +264,6 @@ fn measure_dir(path: &Path) -> Result<(u64, u64)> {
         }
     }
     Ok((file_count, total_bytes))
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.2} GB", b / GB)
-    } else if b >= MB {
-        format!("{:.1} MB", b / MB)
-    } else if b >= KB {
-        format!("{:.1} KB", b / KB)
-    } else {
-        format!("{} B", bytes)
-    }
 }
 
 fn format_last_active(value: Option<&str>) -> String {
@@ -368,7 +351,7 @@ fn init_tracing(cwd: &Path) -> Option<StderrHandle> {
             .with_target(false)
             .with_ansi(ansi)
             .without_time()
-            .with_writer(std::io::stderr)
+            .with_writer(io::stderr)
             .with_filter(stderr_filter);
         let subscriber = tracing_subscriber::registry().with(stderr_layer);
         if let Some(file) = file {
@@ -386,7 +369,7 @@ fn init_tracing(cwd: &Path) -> Option<StderrHandle> {
         let stderr_layer = fmt::layer()
             .with_target(false)
             .with_ansi(ansi)
-            .with_writer(std::io::stderr)
+            .with_writer(io::stderr)
             .with_filter(filter);
         let subscriber = tracing_subscriber::registry().with(stderr_layer);
         if let Some(file) = file {
