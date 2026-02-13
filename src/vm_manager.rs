@@ -1,15 +1,13 @@
+use crate::session_manager::INSTANCE_DIR_NAME;
 use crate::utils::pid_is_alive;
 use crate::{
     config::CONFIG_PATH_ENV,
     instance::STATUS_FILE_NAME,
-    instance::VM_ROOT_LOG_NAME,
     instance::{
         InstanceConfig, build_ssh_login_actions, ensure_instance_dir, ensure_ssh_keypair,
         extract_ipv4, load_or_create_instance_config, write_instance_config,
     },
-    session_manager::{
-        GLOBAL_DIR_NAME, INSTANCE_FILENAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME,
-    },
+    session_manager::{GLOBAL_DIR_NAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME},
     vm::{self, DirectoryShare, LoginAction, PROJECT_GUEST_BASE, VmInput},
 };
 use anyhow::{Error, Result, anyhow, bail};
@@ -29,6 +27,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg_attr(feature = "mock-vm", allow(dead_code))]
+const VM_ROOT_LOG_NAME: &str = "vm_root.log";
 const VM_MANAGER_LOCK_NAME: &str = "vm.lock";
 const VM_MANAGER_LOG_NAME: &str = "vm_manager.log";
 const SHUTDOWN_RETRY_MS: u64 = 500;
@@ -51,7 +51,7 @@ pub fn ensure_manager(
     raw_args: &[std::ffi::OsString],
     auto_shutdown_ms: u64,
     config_path: Option<&Path>,
-) -> Result<UnixStream, Box<dyn std::error::Error>> {
+) -> Result<UnixStream> {
     let project_root = env::current_dir()?;
     tracing::debug!(root = %project_root.display(), "ensure vm manager");
     let instance_dir = ensure_instance_dir(&project_root)?;
@@ -98,12 +98,11 @@ pub fn ensure_manager(
                         drop(lock_file.take());
                         let _ = fs::remove_file(&lock_path);
                     }
-                    return Err(format!(
-                        "Timed out waiting for vm manager socket: {} ({})",
+                    bail!(format!(
+                        "timed out waiting for vm manager socket: {} ({})",
                         socket_path.display(),
                         err
-                    )
-                    .into());
+                    ));
                 }
                 thread::sleep(Duration::from_millis(100));
             }
@@ -153,17 +152,16 @@ fn spawn_manager_process(
     auto_shutdown_ms: u64,
     instance_dir: &Path,
     config_path: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let exe = env::current_exe()?;
     let mut supervisor_exe = exe.clone();
     supervisor_exe.set_file_name("vibebox-supervisor");
     // intentional
     if !supervisor_exe.exists() {
-        return Err(format!(
+        bail!(format!(
             "vibebox-supervisor not found at {}",
             supervisor_exe.display()
-        )
-        .into());
+        ));
     }
     let mut cmd = Command::new(supervisor_exe);
     if raw_args.len() > 1 {
@@ -413,7 +411,7 @@ fn send_client_pid(stream: &UnixStream) {
     }
 }
 
-fn acquire_spawn_lock(lock_path: &Path) -> Result<Option<fs::File>, Box<dyn std::error::Error>> {
+fn acquire_spawn_lock(lock_path: &Path) -> Result<Option<fs::File>> {
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -488,12 +486,12 @@ fn read_client_pid(stream: &UnixStream) -> Option<u32> {
 #[cfg_attr(feature = "mock-vm", allow(dead_code))]
 fn spawn_manager_io(
     config: Arc<Mutex<InstanceConfig>>,
-    instance_dir: PathBuf,
+    project_dir: PathBuf,
     output_monitor: Arc<vm::OutputMonitor>,
     vm_output_fd: std::os::unix::io::OwnedFd,
     vm_input_fd: std::os::unix::io::OwnedFd,
 ) -> vm::IoContext {
-    let log_path = instance_dir.join(VM_ROOT_LOG_NAME);
+    let log_path = project_dir.join(INSTANCE_DIR_NAME).join(VM_ROOT_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -502,7 +500,6 @@ fn spawn_manager_io(
         .ok()
         .map(|file| Arc::new(Mutex::new(file)));
 
-    let instance_path = instance_dir.join(INSTANCE_FILENAME);
     let config_for_output = config.clone();
     let log_for_output = log_file.clone();
     let mut line_buf = String::new();
@@ -533,7 +530,7 @@ fn spawn_manager_io(
                     && cfg.vm_ipv4.as_deref() != Some(ip.as_str())
                 {
                     cfg.vm_ipv4 = Some(ip.clone());
-                    let _ = write_instance_config(&instance_path, &cfg);
+                    let _ = write_instance_config(&project_dir, &cfg);
                 }
             }
         }
@@ -570,7 +567,7 @@ trait VmExecutor {
         config: Arc<Mutex<InstanceConfig>>,
         instance_dir: PathBuf,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
-    ) -> Result<(), Box<dyn std::error::Error>>;
+    ) -> Result<()>;
 }
 
 #[cfg_attr(feature = "mock-vm", allow(dead_code))]
@@ -583,15 +580,15 @@ impl VmExecutor for RealVmExecutor {
         extra_login_actions: Vec<LoginAction>,
         extra_shares: Vec<DirectoryShare>,
         config: Arc<Mutex<InstanceConfig>>,
-        instance_dir: PathBuf,
+        project_dir: PathBuf,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         vm::run_with_args_and_extras(
             args,
             |output_monitor, vm_output_fd, vm_input_fd| {
                 let io_ctx = spawn_manager_io(
                     config.clone(),
-                    instance_dir.clone(),
+                    project_dir,
                     output_monitor,
                     vm_output_fd,
                     vm_input_fd,
@@ -618,7 +615,7 @@ impl VmExecutor for MockVmExecutor {
         _config: Arc<Mutex<InstanceConfig>>,
         _instance_dir: PathBuf,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         let (tx, rx) = mpsc::channel::<VmInput>();
         *vm_input_tx.lock().unwrap() = Some(tx);
         tracing::info!("mock vm executor running");
@@ -669,15 +666,15 @@ fn run_manager_with(
         let _ = ensure_ssh_keypair(&instance_dir)?;
     }
 
-    let mut config = load_or_create_instance_config(&instance_dir)?;
+    let mut config = load_or_create_instance_config(project_root)?;
     if config.vm_ipv4.is_some() {
         config.vm_ipv4 = None;
-        write_instance_config(&instance_dir.join(INSTANCE_FILENAME), &config)?;
+        write_instance_config(project_root, &config)?;
     }
     let config = Arc::new(Mutex::new(config));
     let ssh_user = config
         .lock()
-        .map(|cfg| cfg.ssh_user_display())
+        .map(|cfg| cfg.ssh_user.clone())
         .map_err(|_| anyhow!("failed to acquire ssh user display"))?;
     if !args.no_default_mounts {
         inject_project_mount(&mut args.mounts, project_root, &ssh_user, &project_name);
@@ -742,7 +739,7 @@ fn run_manager_with(
         extra_login_actions,
         extra_shares,
         config.clone(),
-        instance_dir.clone(),
+        project_root.to_path_buf(),
         vm_input_tx.clone(),
     );
     tracing::info!("vm manager vm run completed");
@@ -754,7 +751,7 @@ fn run_manager_with(
     let _ = event_tx.send(ManagerEvent::VmExited(vm_err.clone()));
     let event_loop_result = event_loop_handle
         .join()
-        .unwrap_or_else(|_| Err("vm manager event loop panicked".into()))
+        .unwrap_or_else(|_| Err(Error::msg("vm manager event loop panicked")))
         .map_err(|err| err.to_string());
     let _ = fs::remove_file(&socket_path);
     if let Err(err) = &event_loop_result {
@@ -773,7 +770,7 @@ fn manager_event_loop(
     event_rx: mpsc::Receiver<ManagerEvent>,
     vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
     auto_shutdown_ms: u64,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut ref_count: usize = 0;
     let mut shutdown_deadline: Option<Instant> = None;
     let mut shutdown_sent = false;

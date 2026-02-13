@@ -474,27 +474,27 @@ fn write_buffer_with_style(buffer: &Buffer, out: &mut impl Write) -> io::Result<
     Ok(())
 }
 
-fn map_color(color: ratatui::style::Color) -> CrosstermColor {
+fn map_color(color: Color) -> CrosstermColor {
     match color {
-        ratatui::style::Color::Reset => CrosstermColor::Reset,
-        ratatui::style::Color::Black => CrosstermColor::Black,
-        ratatui::style::Color::Red => CrosstermColor::DarkRed,
-        ratatui::style::Color::Green => CrosstermColor::DarkGreen,
-        ratatui::style::Color::Yellow => CrosstermColor::DarkYellow,
-        ratatui::style::Color::Blue => CrosstermColor::DarkBlue,
-        ratatui::style::Color::Magenta => CrosstermColor::DarkMagenta,
-        ratatui::style::Color::Cyan => CrosstermColor::DarkCyan,
-        ratatui::style::Color::Gray => CrosstermColor::Grey,
-        ratatui::style::Color::DarkGray => CrosstermColor::DarkGrey,
-        ratatui::style::Color::LightRed => CrosstermColor::Red,
-        ratatui::style::Color::LightGreen => CrosstermColor::Green,
-        ratatui::style::Color::LightYellow => CrosstermColor::Yellow,
-        ratatui::style::Color::LightBlue => CrosstermColor::Blue,
-        ratatui::style::Color::LightMagenta => CrosstermColor::Magenta,
-        ratatui::style::Color::LightCyan => CrosstermColor::Cyan,
-        ratatui::style::Color::White => CrosstermColor::White,
-        ratatui::style::Color::Rgb(r, g, b) => CrosstermColor::Rgb { r, g, b },
-        ratatui::style::Color::Indexed(i) => CrosstermColor::AnsiValue(i),
+        Color::Reset => CrosstermColor::Reset,
+        Color::Black => CrosstermColor::Black,
+        Color::Red => CrosstermColor::DarkRed,
+        Color::Green => CrosstermColor::DarkGreen,
+        Color::Yellow => CrosstermColor::DarkYellow,
+        Color::Blue => CrosstermColor::DarkBlue,
+        Color::Magenta => CrosstermColor::DarkMagenta,
+        Color::Cyan => CrosstermColor::DarkCyan,
+        Color::Gray => CrosstermColor::Grey,
+        Color::DarkGray => CrosstermColor::DarkGrey,
+        Color::LightRed => CrosstermColor::Red,
+        Color::LightGreen => CrosstermColor::Green,
+        Color::LightYellow => CrosstermColor::Yellow,
+        Color::LightBlue => CrosstermColor::Blue,
+        Color::LightMagenta => CrosstermColor::Magenta,
+        Color::LightCyan => CrosstermColor::Cyan,
+        Color::White => CrosstermColor::White,
+        Color::Rgb(r, g, b) => CrosstermColor::Rgb { r, g, b },
+        Color::Indexed(i) => CrosstermColor::AnsiValue(i),
     }
 }
 

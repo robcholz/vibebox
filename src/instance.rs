@@ -16,14 +16,13 @@ use uuid::Uuid;
 
 use crate::{
     commands,
-    session_manager::{INSTANCE_DIR_NAME, INSTANCE_FILENAME},
+    session_manager::INSTANCE_DIR_NAME,
     vm::{self, LoginAction},
 };
 
 const SSH_KEY_NAME: &str = "ssh_key";
-#[cfg_attr(feature = "mock-vm", allow(dead_code))]
-pub(crate) const VM_ROOT_LOG_NAME: &str = "vm_root.log";
-pub(crate) const STATUS_FILE_NAME: &str = "status.txt";
+pub const STATUS_FILE_NAME: &str = "status.txt";
+const INSTANCE_FILENAME: &str = "instance.toml";
 const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
@@ -34,43 +33,46 @@ fn default_ssh_user() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct InstanceConfig {
+pub struct InstanceConfig {
     #[serde(default)]
-    id: String,
+    pub id: String,
     #[serde(default = "default_ssh_user")]
-    ssh_user: String,
+    pub ssh_user: String,
     #[serde(default)]
     sudo_password: String,
     #[serde(default)]
-    last_active: Option<String>,
+    pub last_active: Option<String>,
     #[serde(default)]
-    pub(crate) vm_ipv4: Option<String>,
+    pub vm_ipv4: Option<String>,
 }
 
-impl InstanceConfig {
-    pub(crate) fn ssh_user_display(&self) -> String {
-        if self.ssh_user.trim().is_empty() {
-            DEFAULT_SSH_USER.to_string()
-        } else {
-            self.ssh_user.clone()
+impl Default for InstanceConfig {
+    fn default() -> Self {
+        Self {
+            id: Uuid::now_v7().to_string(),
+            ssh_user: DEFAULT_SSH_USER.to_string(),
+            sudo_password: Uuid::now_v7().simple().to_string(),
+            last_active: None,
+            vm_ipv4: None,
         }
     }
 }
 
-pub fn run_with_ssh(_: UnixStream) -> Result<()> {
+pub fn run_with_ssh(manager_conn: UnixStream) -> Result<()> {
     let project_root = env::current_dir()?;
     tracing::info!(root = %project_root.display(), "starting ssh session");
     let instance_dir = ensure_instance_dir(&project_root)?;
     tracing::debug!(instance_dir = %instance_dir.display(), "instance dir ready");
     let (ssh_key, _ssh_pub) = ensure_ssh_keypair(&instance_dir)?;
 
-    let config = load_or_create_instance_config(&instance_dir)?;
+    let config = load_or_create_instance_config(&project_root)?;
     let ssh_user = config.ssh_user.clone();
     tracing::debug!(ssh_user = %ssh_user, "loaded instance config");
 
-    wait_for_vm_ipv4(&instance_dir, Duration::from_secs(480))?;
+    let _manager_conn = manager_conn;
+    wait_for_vm_ipv4(&project_root, Duration::from_secs(480))?;
 
-    let ip = load_or_create_instance_config(&instance_dir)?
+    let ip = load_or_create_instance_config(&project_root)?
         .vm_ipv4
         .with_context(|| "failed to load instance IP address")?;
     tracing::info!(ip = %ip, "vm ipv4 ready");
@@ -84,7 +86,7 @@ pub fn ensure_instance_dir(project_root: &Path) -> Result<PathBuf, io::Error> {
     Ok(instance_dir)
 }
 
-pub(crate) fn ensure_ssh_keypair(instance_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+pub fn ensure_ssh_keypair(instance_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let private_key = instance_dir.join(SSH_KEY_NAME);
     let public_key = instance_dir.join(format!("{SSH_KEY_NAME}.pub"));
 
@@ -127,94 +129,66 @@ pub(crate) fn ensure_ssh_keypair(instance_dir: &Path) -> Result<(PathBuf, PathBu
     Ok((private_key, public_key))
 }
 
-pub(crate) fn load_or_create_instance_config(instance_dir: &Path) -> Result<InstanceConfig> {
-    let config_path = instance_dir.join(INSTANCE_FILENAME);
-    let mut config = if config_path.exists() {
-        let raw = fs::read_to_string(&config_path)?;
-        toml::from_str::<InstanceConfig>(&raw)?
-    } else {
-        InstanceConfig {
-            id: String::new(),
-            ssh_user: DEFAULT_SSH_USER.to_string(),
-            sudo_password: String::new(),
-            last_active: None,
-            vm_ipv4: None,
-        }
-    };
+pub fn load_or_create_instance_config(project_dir: &Path) -> Result<InstanceConfig> {
+    let mut exist = true;
+    let mut config = read_instance_config(project_dir).unwrap_or_else(|_| {
+        exist = false;
+        InstanceConfig::default()
+    });
 
     let mut changed = false;
     if config.ssh_user.trim().is_empty() {
-        config.ssh_user = DEFAULT_SSH_USER.to_string();
+        config.ssh_user = InstanceConfig::default().ssh_user;
         changed = true;
     }
 
     if config.id.trim().is_empty() {
-        config.id = Uuid::now_v7().to_string();
+        config.id = InstanceConfig::default().id;
         changed = true;
     }
 
     if config.sudo_password.trim().is_empty() {
-        config.sudo_password = generate_password();
+        config.sudo_password = InstanceConfig::default().sudo_password;
         changed = true;
     }
 
-    if !config_path.exists() || changed {
-        write_instance_config(&config_path, &config)?;
+    if !exist || changed {
+        write_instance_config(project_dir, &config)?;
     }
 
     Ok(config)
 }
 
-fn read_instance_config(instance_dir: &Path) -> Result<Option<InstanceConfig>> {
-    let config_path = instance_dir.join(INSTANCE_FILENAME);
+pub fn read_instance_config(project_dir: &Path) -> Result<InstanceConfig> {
+    // todo maybe verify schema?
+    let config_path = project_dir.join(INSTANCE_DIR_NAME).join(INSTANCE_FILENAME);
     if !config_path.exists() {
-        return Ok(None);
+        bail!("instance config file does not exist");
     }
     let raw = fs::read_to_string(&config_path)?;
     let config = toml::from_str::<InstanceConfig>(&raw)?;
-    Ok(Some(config))
+    Ok(config)
 }
 
-pub fn read_instance_vm_ip(instance_dir: &Path) -> Result<Option<String>> {
-    let config = read_instance_config(instance_dir)?;
-    Ok(config.and_then(|cfg| cfg.vm_ipv4))
-}
-
-pub(crate) fn read_instance_ssh_user(instance_dir: &Path) -> String {
-    let config = read_instance_config(instance_dir);
-    match config {
-        Ok(cfg) => match cfg {
-            None => {
-                tracing::warn!("no instance config found, falling back to default");
-                DEFAULT_SSH_USER.into()
-            }
-            Some(cfg) => cfg.ssh_user,
-        },
-        Err(_) => DEFAULT_SSH_USER.into(),
-    }
-}
-
-pub fn touch_last_active(instance_dir: &Path) -> Result<()> {
-    let mut config = load_or_create_instance_config(instance_dir)?;
+pub fn touch_last_active(project_dir: &Path) -> Result<()> {
+    let mut config = load_or_create_instance_config(project_dir)?;
     let now = OffsetDateTime::now_utc().format(&Rfc3339)?;
     config.last_active = Some(now);
-    write_instance_config(&instance_dir.join(INSTANCE_FILENAME), &config)?;
+    write_instance_config(project_dir, &config)?;
     Ok(())
 }
 
-pub(crate) fn write_instance_config(path: &Path, config: &InstanceConfig) -> Result<()> {
+pub fn write_instance_config(project_dir: &Path, config: &InstanceConfig) -> Result<()> {
+    let path = project_dir.join(INSTANCE_DIR_NAME).join(INSTANCE_FILENAME);
     let data = toml::to_string_pretty(config)?;
-    fs::write(path, data)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    fs::create_dir_all(project_dir.join(INSTANCE_DIR_NAME))?;
+    fs::write(&path, data)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     Ok(())
-}
-
-fn generate_password() -> String {
-    Uuid::now_v7().simple().to_string()
 }
 
 #[cfg_attr(feature = "mock-vm", allow(dead_code))]
-pub(crate) fn extract_ipv4(line: &str) -> Option<String> {
+pub fn extract_ipv4(line: &str) -> Option<String> {
     let mut current = String::new();
     let mut best: Option<String> = None;
 
@@ -233,24 +207,24 @@ pub(crate) fn extract_ipv4(line: &str) -> Option<String> {
     best
 }
 
-fn wait_for_vm_ipv4(instance_dir: &Path, timeout: Duration) -> Result<()> {
+fn wait_for_vm_ipv4(project_dir: &Path, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     let mut next_log_at = start + Duration::from_secs(10);
     let mut next_status_check = start;
     tracing::info!("waiting for vm ipv4");
-    let status_path = instance_dir.join(STATUS_FILE_NAME);
+    let status_path = project_dir.join(INSTANCE_DIR_NAME).join(STATUS_FILE_NAME);
     let mut last_status: Option<String> = None;
     let mut status_missing = true;
     let mut once_hint = false;
     loop {
-        let config = load_or_create_instance_config(instance_dir)?;
+        let config = load_or_create_instance_config(project_dir)?;
         if config.vm_ipv4.is_some() {
             let _ = fs::remove_file(&status_path);
             return Ok(());
         }
         if start.elapsed() > timeout {
             let _ = fs::remove_file(&status_path);
-            bail!("Timed out waiting for VM IPv4");
+            bail!("timed out waiting for VM IPv4");
         }
         let now = Instant::now();
         if now >= next_status_check {
@@ -401,7 +375,7 @@ fn ssh_port_open(ip: &str) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
 }
 
-pub(crate) fn build_ssh_login_actions(
+pub fn build_ssh_login_actions(
     config: &Arc<Mutex<InstanceConfig>>,
     project_name: &str,
     project_guest_dir: &str,

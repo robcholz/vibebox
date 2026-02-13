@@ -1,3 +1,4 @@
+use crate::instance::InstanceConfig;
 use crate::utils::relative_to_home;
 use crate::{config, instance, session_manager, tui};
 use anyhow::{Context, Result, bail};
@@ -5,23 +6,26 @@ use std::{
     env,
     path::{Path, PathBuf},
 };
-use tracing::warn;
 
-pub fn build_mount_rows(cwd: &Path, config: &config::Config) -> Result<Vec<tui::MountListRow>> {
+pub fn build_mount_rows(project: &Path, config: &config::Config) -> Result<Vec<tui::MountListRow>> {
     let mut rows = Vec::new();
-    rows.extend(default_mounts(cwd)?);
-    let guest_home = resolve_guest_home(cwd);
+    rows.extend(default_mounts(project)?);
+    let guest_home = resolve_guest_home(project);
     for spec in &config.box_cfg.mounts {
-        rows.push(parse_mount_spec(cwd, spec, false, &guest_home)?);
+        rows.push(parse_mount_spec(project, spec, false, &guest_home)?);
     }
     Ok(rows)
 }
 
-pub fn build_network_rows(cwd: &Path) -> Result<Vec<tui::NetworkListRow>> {
-    let instance_dir = cwd.join(session_manager::INSTANCE_DIR_NAME);
+pub fn build_network_rows(project_dir: &Path) -> Result<Vec<tui::NetworkListRow>> {
     let mut vm_ip = "-".to_string();
-    if let Ok(Some(ip)) = instance::read_instance_vm_ip(&instance_dir) {
-        vm_ip = ip;
+    if let Ok(config) = instance::read_instance_config(project_dir) {
+        match config.vm_ipv4 {
+            None => {}
+            Some(ip) => {
+                vm_ip = ip;
+            }
+        }
     }
     let host_to_vm = if vm_ip == "-" {
         "ssh: <pending>:22".to_string()
@@ -56,10 +60,7 @@ fn default_mounts(cwd: &Path) -> Result<Vec<tui::MountListRow>> {
         .with_context(|| "failed to get home directory")?;
     let cache_home = env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            warn!("failed to get XDG_CACHE_HOME, falling back to ~/.cache");
-            home.join(".cache")
-        });
+        .unwrap_or_else(|_| home.join(".cache"));
     let cache_dir = cache_home.join(session_manager::GLOBAL_CACHE_DIR_NAME);
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
     rows.push(tui::MountListRow {
@@ -124,9 +125,12 @@ fn display_host_spec(cwd: &Path, host: &str) -> String {
     }
 }
 
-fn resolve_guest_home(cwd: &Path) -> String {
-    let instance_dir = cwd.join(session_manager::INSTANCE_DIR_NAME);
-    format!("/home/{}", instance::read_instance_ssh_user(&instance_dir))
+fn resolve_guest_home(project_dir: &Path) -> String {
+    let config = instance::read_instance_config(project_dir);
+    match config {
+        Ok(config) => format!("/home/{}", config.ssh_user),
+        Err(_) => format!("/home/{}", InstanceConfig::default().ssh_user),
+    }
 }
 
 fn resolve_guest_display(guest: &str, guest_home: &str) -> String {

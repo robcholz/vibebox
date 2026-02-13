@@ -25,7 +25,7 @@
 5. [x] Implement rendering functions for header, terminal area, input area, completions, and status bar.
 6. [x] Implement async event loop (keyboard, resize, tick) with crossterm EventStream + tokio.
 7. [x] Add a standalone TUI CLI binary (no main.rs wiring) with placeholder VM info and TODOs for VM integration.
-8. [ ] Run tests and validate coverage for the new module.
+8. [x] Run tests and validate coverage for the new module.
 
 ## TUI
 
@@ -49,7 +49,7 @@
    4. [x] set up the cli.
 9. [x] fix ui overlap, and consistency issue.
 10. [x] `purge-cache` to clear the cache.
-11. [ ] intensive integration test.
+11. [x] intensive integration test.
 
 ## Publish
 
@@ -60,10 +60,10 @@
 ## Stage 2
 
 1. [ ] retouch the cli ux.
-2. [ ] refactor the code.
+2. [x] refactor the code.
 3. [ ] refactor the mount system.
 4. [ ] refactor the vm process 
-5. [ ] Redirect vm output to log.
+5. [x] Redirect vm output to log.
 6. [ ] Redirect vm output to vibebox starting it.
-7. [ ] use anyhow to sync api.
+7. [x] use anyhow to sync api.
 8. [ ] add support for ipv6.

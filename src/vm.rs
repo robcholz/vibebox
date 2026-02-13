@@ -1,5 +1,6 @@
 use crate::instance::STATUS_FILE_NAME;
 use crate::session_manager::{GLOBAL_CACHE_DIR_NAME, INSTANCE_DIR_NAME};
+use anyhow::{Context, Error, Result, bail};
 use std::{
     env, fs,
     io::{self, Write},
@@ -23,6 +24,7 @@ use std::{
 };
 
 use block2::RcBlock;
+use bytesize::ByteSize;
 use dispatch2::DispatchQueue;
 use objc2::{AnyThread, rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::*;
@@ -72,7 +74,7 @@ const INSTANCE_RAW_NAME: &str = "instance.raw";
 const BASE_DISK_RAW_NAME: &str = "disk.raw";
 
 #[derive(Clone)]
-pub(crate) enum LoginAction {
+pub enum LoginAction {
     Expect {
         text: String,
         timeout: Duration,
@@ -88,20 +90,16 @@ use crate::config::BoxConfig;
 use LoginAction::*;
 
 #[derive(Clone)]
-pub(crate) struct DirectoryShare {
+pub struct DirectoryShare {
     host: PathBuf,
     guest: PathBuf,
     read_only: bool,
 }
 
 impl DirectoryShare {
-    pub(crate) fn new(
-        host: PathBuf,
-        mut guest: PathBuf,
-        read_only: bool,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(host: PathBuf, mut guest: PathBuf, read_only: bool) -> Result<Self> {
         if !host.exists() {
-            return Err(format!("Host path does not exist: {}", host.display()).into());
+            bail!(format!("Host path does not exist: {}", host.display()));
         }
         if !guest.is_absolute() {
             guest = PathBuf::from("/root").join(guest);
@@ -113,10 +111,10 @@ impl DirectoryShare {
         })
     }
 
-    pub(crate) fn from_mount_spec(spec: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_mount_spec(spec: &str) -> Result<Self> {
         let parts: Vec<&str> = spec.split(':').collect();
         if parts.len() < 2 || parts.len() > 3 {
-            return Err(format!("Invalid mount spec: {spec}").into());
+            bail!(format!("Invalid mount spec: {spec}"));
         }
         let host = expand_tilde_path(parts[0]);
         let guest = PathBuf::from(parts[1]);
@@ -125,11 +123,10 @@ impl DirectoryShare {
                 "read-only" => true,
                 "read-write" => false,
                 _ => {
-                    return Err(format!(
+                    bail!(format!(
                         "Invalid mount mode '{}'; expected read-only or read-write",
                         parts[2]
-                    )
-                    .into());
+                    ));
                 }
             }
         } else {
@@ -173,19 +170,19 @@ pub struct VmArg {
     pub mounts: Vec<String>,
 }
 
-pub fn run_with_args<F>(args: VmArg, io_handler: F) -> Result<(), Box<dyn std::error::Error>>
+pub fn run_with_args<F>(args: VmArg, io_handler: F) -> Result<()>
 where
     F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
 {
     run_with_args_and_extras(args, io_handler, Vec::new(), Vec::new())
 }
 
-pub(crate) fn run_with_args_and_extras<F>(
+pub fn run_with_args_and_extras<F>(
     args: VmArg,
     io_handler: F,
     extra_login_actions: Vec<LoginAction>,
     extra_directory_shares: Vec<DirectoryShare>,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<()>
 where
     F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
 {
@@ -194,7 +191,7 @@ where
     let project_root = env::current_dir()?;
     let project_name = project_root
         .file_name()
-        .ok_or("Project directory has no name")?
+        .with_context(|| "Project directory has no name")?
         .to_string_lossy()
         .into_owned();
 
@@ -239,7 +236,7 @@ where
     let _ = ensure_instance_disk(
         &instance_raw,
         &default_raw,
-        args.disk_bytes,
+        ByteSize(args.disk_bytes),
         Some(&status_file),
     )?;
     let base_size = fs::metadata(&default_raw)?.len();
@@ -291,10 +288,7 @@ where
     )
 }
 
-pub(crate) fn script_command_from_content(
-    label: &str,
-    script: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+pub fn script_command_from_content(label: &str, script: &str) -> Result<String> {
     let marker = "VIBE_SCRIPT_EOF";
     let guest_dir = "/tmp/vibe-scripts";
     let guest_path = format!("{guest_dir}/{label}.sh");
@@ -302,9 +296,9 @@ pub(crate) fn script_command_from_content(
         "mkdir -p {guest_dir}\ncat >{guest_path} <<'{marker}'\n{script}\n{marker}\nchmod +x {guest_path}\n{guest_path}"
     );
     if script.contains(marker) {
-        return Err(
-            format!("Script '{label}' contains marker '{marker}', cannot safely upload").into(),
-        );
+        bail!(format!(
+            "Script '{label}' contains marker '{marker}', cannot safely upload"
+        ));
     }
     Ok(command)
 }
@@ -502,7 +496,7 @@ fn ensure_base_image(
     base_raw: &Path,
     base_compressed: &Path,
     status: Option<&StatusFile>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if base_raw.exists() {
         return Ok(());
     }
@@ -527,7 +521,7 @@ fn ensure_base_image(
             ])
             .status()?;
         if !status.success() {
-            return Err("Failed to download base image".into());
+            bail!("Failed to download base image");
         }
     }
 
@@ -553,7 +547,9 @@ fn ensure_base_image(
 
         let status = child.wait().expect("failed to wait on child");
         if !status.success() {
-            return Err(format!("SHA validation failed for {DEBIAN_COMPRESSED_DISK_URL}").into());
+            bail!(format!(
+                "SHA validation failed for {DEBIAN_COMPRESSED_DISK_URL}"
+            ));
         }
     }
 
@@ -567,11 +563,11 @@ fn ensure_base_image(
             &base_compressed.to_string_lossy(),
             BASE_DISK_RAW_NAME,
         ])
-        .stdout(std::fs::File::create(base_raw)?)
+        .stdout(fs::File::create(base_raw)?)
         .status()?;
 
     if !status.success() {
-        return Err("Failed to decompress base image".into());
+        bail!("Failed to decompress base image");
     }
 
     Ok(())
@@ -584,7 +580,7 @@ fn ensure_default_image(
     directory_shares: &[DirectoryShare],
     status: Option<&StatusFile>,
     provision_log: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if default_raw.exists() {
         return Ok(());
     }
@@ -641,18 +637,16 @@ fn ensure_default_image(
 fn ensure_instance_disk(
     instance_raw: &Path,
     template_raw: &Path,
-    target_bytes: u64,
+    target_bytes: ByteSize,
     status: Option<&StatusFile>,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> Result<bool> {
     if instance_raw.exists() {
-        let current_size = fs::metadata(instance_raw)?.len();
+        let current_size = ByteSize(fs::metadata(instance_raw)?.len());
         if current_size != target_bytes {
-            let current_gb = current_size as f64 / (1024.0 * 1024.0 * 1024.0);
-            let target_gb = target_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let current_gb = current_size;
+            let target_gb = target_bytes;
             tracing::warn!(
-                current_bytes = current_size,
-                target_bytes,
-                "instance disk size does not match config (current {:.2} GB, config {:.2} GB); disk_gb applies only on init. Run `vibebox reset` to recreate or set disk_gb to match; using existing disk.",
+                "instance disk size does not match config (current {}, config {}); disk_gb applies only on init. Run `vibebox reset` to recreate or set disk_gb to match; using existing disk.",
                 current_gb,
                 target_gb
             );
@@ -660,13 +654,12 @@ fn ensure_instance_disk(
         return Ok(false);
     }
 
-    let template_size = fs::metadata(template_raw)?.len();
+    let template_size = ByteSize(fs::metadata(template_raw)?.len());
     if target_bytes < template_size {
-        return Err(format!(
-            "Requested disk size {} bytes is smaller than base image size {} bytes",
+        bail!(format!(
+            "Requested disk size {} is smaller than base image size {}",
             target_bytes, template_size
-        )
-        .into());
+        ));
     }
     let target_size = target_bytes;
     let needs_resize = target_size > template_size;
@@ -675,15 +668,15 @@ fn ensure_instance_disk(
         status.update("creating instance disk...");
     }
     tracing::info!(path = %template_raw.display(), "creating instance disk");
-    std::fs::create_dir_all(instance_raw.parent().unwrap())?;
+    fs::create_dir_all(instance_raw.parent().unwrap())?;
     if target_size == template_size {
         fs::copy(template_raw, instance_raw)?;
         return Ok(needs_resize);
     }
 
-    let mut dst = std::fs::File::create(instance_raw)?;
-    dst.set_len(target_size)?;
-    let mut src = std::fs::File::open(template_raw)?;
+    let mut dst = fs::File::create(instance_raw)?;
+    dst.set_len(target_size.as_u64())?;
+    let mut src = fs::File::open(template_raw)?;
     std::io::copy(&mut src, &mut dst)?;
     Ok(needs_resize)
 }
@@ -701,18 +694,17 @@ pub fn create_pipe() -> (OwnedFd, OwnedFd) {
     (read_stream.into(), write_stream.into())
 }
 
-pub fn spawn_vm_io_with_hooks<F, G>(
+pub fn spawn_vm_io_with_hooks<
+    F: FnMut(&str) -> bool + std::marker::Send + 'static,
+    G: FnMut(&[u8]) + std::marker::Send + 'static,
+>(
     output_monitor: Arc<OutputMonitor>,
     vm_output_fd: OwnedFd,
     vm_input_fd: OwnedFd,
     io_control: Arc<IoControl>,
     mut on_line: F,
     mut on_output: G,
-) -> IoContext
-where
-    F: FnMut(&str) -> bool + ::std::marker::Send + 'static,
-    G: FnMut(&[u8]) + ::std::marker::Send + 'static,
-{
+) -> IoContext {
     let (input_tx, input_rx): (Sender<VmInput>, Receiver<VmInput>) = mpsc::channel();
 
     // raw_guard is set when we've put the user's terminal into raw mode because we've attached stdin/stdout to the VM.
@@ -860,14 +852,14 @@ where
                     PollResult::Spurious => continue,
                     PollResult::Ready(bytes) => {
                         if io_control.forward_output() {
-                            // enable raw mode, if we haven't already
+                            // enable raw mode if we haven't already
                             if raw_guard.lock().unwrap().is_none()
                                 && let Ok(guard) = enable_raw_mode(libc::STDIN_FILENO)
                             {
                                 *raw_guard.lock().unwrap() = Some(guard);
                             }
 
-                            let mut stdout = std::io::stdout().lock();
+                            let mut stdout = io::stdout().lock();
                             if stdout.write_all(bytes).is_err() {
                                 break;
                             }
@@ -883,7 +875,7 @@ where
 
     // Copies data from mpsc channel into VM, so vibe can "type" stuff and run scripts.
     let mux_thread = thread::spawn(move || {
-        let mut vm_writer = std::fs::File::from(vm_input_fd);
+        let mut vm_writer = fs::File::from(vm_input_fd);
         loop {
             match input_rx.recv() {
                 Ok(VmInput::Bytes(data)) => {
@@ -913,7 +905,7 @@ pub fn spawn_vm_io_with_line_handler<F>(
     on_line: F,
 ) -> IoContext
 where
-    F: FnMut(&str) -> bool + ::std::marker::Send + 'static,
+    F: FnMut(&str) -> bool + std::marker::Send + 'static,
 {
     spawn_vm_io_with_hooks(
         output_monitor,
@@ -980,7 +972,7 @@ fn create_vm_configuration(
     vm_writes_to_fd: OwnedFd,
     cpu_count: usize,
     ram_bytes: u64,
-) -> Result<Retained<VZVirtualMachineConfiguration>, Box<dyn std::error::Error>> {
+) -> Result<Retained<VZVirtualMachineConfiguration>> {
     unsafe {
         let platform =
             VZGenericPlatformConfiguration::init(VZGenericPlatformConfiguration::alloc());
@@ -1014,7 +1006,7 @@ fn create_vm_configuration(
             false,
             VZDiskImageCachingMode::Automatic,
             VZDiskImageSynchronizationMode::Full,
-        ).unwrap();
+        )?;
 
             let disk_device = VZVirtioBlockDeviceConfiguration::initWithAttachment(
                 VZVirtioBlockDeviceConfiguration::alloc(),
@@ -1110,9 +1102,9 @@ fn create_vm_configuration(
     }
 }
 
-fn load_efi_variable_store() -> Result<Retained<VZEFIVariableStore>, Box<dyn std::error::Error>> {
+fn load_efi_variable_store() -> Result<Retained<VZEFIVariableStore>> {
     unsafe {
-        let temp_dir = std::env::temp_dir();
+        let temp_dir = env::temp_dir();
         let temp_path = temp_dir.join(format!("efi_variable_store_{}.efivars", std::process::id()));
         let url = nsurl_from_path(&temp_path)?;
         let options = VZEFIVariableStoreInitializationOptions::AllowOverwrite;
@@ -1128,8 +1120,8 @@ fn load_efi_variable_store() -> Result<Retained<VZEFIVariableStore>, Box<dyn std
 fn spawn_login_actions_thread(
     login_actions: Vec<LoginAction>,
     output_monitor: Arc<OutputMonitor>,
-    input_tx: mpsc::Sender<VmInput>,
-    vm_output_tx: mpsc::Sender<VmOutput>,
+    input_tx: Sender<VmInput>,
+    vm_output_tx: Sender<VmOutput>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         for a in login_actions {
@@ -1181,7 +1173,7 @@ fn run_vm_with_io<F>(
     ram_bytes: u64,
     status: Option<&StatusFile>,
     io_handler: F,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<()>
 where
     F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
 {
@@ -1228,18 +1220,18 @@ where
 
         match rx.try_recv() {
             Ok(result) => {
-                result.map_err(|e| format!("Failed to start VM: {}", e))?;
+                result.map_err(|e| Error::msg(format!("Failed to start VM: {}", e)))?;
                 break;
             }
             Err(mpsc::TryRecvError::Empty) => continue,
             Err(mpsc::TryRecvError::Disconnected) => {
-                return Err("VM start channel disconnected".into());
+                bail!("VM start channel disconnected");
             }
         }
     }
 
     if Instant::now() >= start_deadline {
-        return Err("Timed out waiting for VM to start".into());
+        bail!("Timed out waiting for VM to start");
     }
 
     if let Some(status) = status {
@@ -1290,7 +1282,7 @@ where
     );
 
     let mut last_state = None;
-    let mut exit_result = Ok(());
+    let mut exit_result: Result<(), String> = Ok(());
     loop {
         unsafe {
             NSRunLoop::mainRunLoop().runMode_beforeDate(
@@ -1309,8 +1301,7 @@ where
                 exit_result = Err(format!(
                     "Login action ({}) timed out after {:?}; shutting down.",
                     action, timeout
-                )
-                .into());
+                ));
                 unsafe {
                     if vm.canRequestStop() {
                         if let Err(err) = vm.requestStopWithError() {
@@ -1327,8 +1318,7 @@ where
                 exit_result = Err(format!(
                     "Login action ({}) failed: {}; shutting down.",
                     action, reason
-                )
-                .into());
+                ));
                 unsafe {
                     if vm.canRequestStop() {
                         if let Err(err) = vm.requestStopWithError() {
@@ -1344,7 +1334,7 @@ where
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {}
         }
-        if state != objc2_virtualization::VZVirtualMachineState::Running {
+        if state != VZVirtualMachineState::Running {
             //eprintln!("VM stopped with state: {:?}", state);
             break;
         }
@@ -1354,7 +1344,7 @@ where
 
     io_ctx.shutdown();
 
-    exit_result
+    exit_result.map_err(Error::msg)
 }
 
 fn run_vm(
@@ -1364,7 +1354,7 @@ fn run_vm(
     cpu_count: usize,
     ram_bytes: u64,
     status: Option<&StatusFile>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     run_vm_with_io(
         disk_path,
         login_actions,
@@ -1376,7 +1366,7 @@ fn run_vm(
     )
 }
 
-fn nsurl_from_path(path: &Path) -> Result<Retained<NSURL>, Box<dyn std::error::Error>> {
+fn nsurl_from_path(path: &Path) -> Result<Retained<NSURL>> {
     let abs_path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1385,7 +1375,7 @@ fn nsurl_from_path(path: &Path) -> Result<Retained<NSURL>, Box<dyn std::error::E
     let ns_path = NSString::from_str(
         abs_path
             .to_str()
-            .ok_or("Non-UTF8 path encountered while building NSURL")?,
+            .with_context(|| "Non-UTF8 path encountered while building NSURL")?,
     );
     Ok(NSURL::fileURLWithPath(&ns_path))
 }
@@ -1400,7 +1390,7 @@ fn enable_raw_mode(fd: i32) -> io::Result<RawModeGuard> {
     let original = attributes;
 
     // Disable translation of carriage return to newline on input
-    attributes.c_iflag &= !(libc::ICRNL);
+    attributes.c_iflag &= !libc::ICRNL;
     // Disable canonical mode (line buffering), echo, and signal generation
     attributes.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
     attributes.c_cc[libc::VMIN] = 0;
@@ -1428,10 +1418,10 @@ impl Drop for RawModeGuard {
 
 // Ensure the running binary has com.apple.security.virtualization entitlements by checking and, if not, signing and relaunching.
 pub fn ensure_signed() {
-    if std::env::var("VIBEBOX_SKIP_CODESIGN").as_deref() == Ok("1") {
+    if env::var("VIBEBOX_SKIP_CODESIGN").as_deref() == Ok("1") {
         return;
     }
-    let exe = std::env::current_exe().expect("failed to get current exe path");
+    let exe = env::current_exe().expect("failed to get current exe path");
     let exe_str = exe.to_str().expect("exe path not valid utf-8");
 
     let has_required_entitlements = {
@@ -1453,8 +1443,8 @@ pub fn ensure_signed() {
     }
 
     const ENTITLEMENTS: &str = include_str!("entitlements.plist");
-    let entitlements_path = std::env::temp_dir().join("entitlements.plist");
-    std::fs::write(&entitlements_path, ENTITLEMENTS).expect("failed to write entitlements");
+    let entitlements_path = env::temp_dir().join("entitlements.plist");
+    fs::write(&entitlements_path, ENTITLEMENTS).expect("failed to write entitlements");
 
     let output = Command::new("codesign")
         .args([
@@ -1467,7 +1457,7 @@ pub fn ensure_signed() {
         ])
         .output();
 
-    let _ = std::fs::remove_file(&entitlements_path);
+    let _ = fs::remove_file(&entitlements_path);
 
     match output {
         Ok(o) if o.status.success() => {
@@ -1475,7 +1465,7 @@ pub fn ensure_signed() {
             if !stderr.trim().is_empty() {
                 tracing::debug!(codesign_stderr = %stderr.trim(), "codesign output");
             }
-            let err = Command::new(&exe).args(std::env::args_os().skip(1)).exec();
+            let err = Command::new(&exe).args(env::args_os().skip(1)).exec();
             tracing::error!(error = %err, "failed to re-exec after signing");
             std::process::exit(1);
         }

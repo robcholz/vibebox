@@ -21,12 +21,12 @@ fn main() -> Result<()> {
     color_eyre::install()?;
 
     tracing::info!("starting vm supervisor");
-    let cwd = env::current_dir().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
-    let config =
-        config::load_config(&cwd).map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
-    let instance_dir = instance::ensure_instance_dir(&cwd)
+    let project_dir = env::current_dir().map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    let config = config::load_config(&project_dir)
         .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
-    let _ = instance::touch_last_active(&instance_dir);
+    let _ = instance::ensure_instance_dir(&project_dir)
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    let _ = instance::touch_last_active(&project_dir);
     let args = vm::VmArg {
         cpu_count: config.box_cfg.cpu_count,
         ram_bytes: config.box_cfg.ram_size.as_u64(),
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
     tracing::info!(auto_shutdown_ms, "vm supervisor config");
 
     let result = vm_manager::run_manager(args, auto_shutdown_ms);
-    let _ = instance::touch_last_active(&instance_dir);
+    let _ = instance::touch_last_active(&project_dir);
     if let Err(err) = result {
         tracing::error!(error = %err, "vm supervisor exited");
         return Err(color_eyre::eyre::eyre!(err.to_string()));
