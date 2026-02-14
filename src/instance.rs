@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
-    io::{self},
+    io::{self, Read},
     net::{SocketAddr, TcpStream},
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
@@ -21,12 +21,13 @@ use crate::{
 };
 
 const SSH_KEY_NAME: &str = "ssh_key";
-pub const STATUS_FILE_NAME: &str = "status.txt";
 const INSTANCE_FILENAME: &str = "instance.toml";
 const DEFAULT_SSH_USER: &str = "vibecoder";
 const SSH_CONNECT_RETRIES: usize = 30;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
 const SSH_SETUP_SCRIPT: &str = include_str!("ssh.sh");
+const STATUS_PREFIX: &str = "status:";
+const STATUS_ERROR_PREFIX: &str = "error:";
 
 fn default_ssh_user() -> String {
     DEFAULT_SSH_USER.to_string()
@@ -69,8 +70,7 @@ pub fn run_with_ssh(manager_conn: UnixStream) -> Result<()> {
     let ssh_user = config.ssh_user.clone();
     tracing::debug!(ssh_user = %ssh_user, "loaded instance config");
 
-    let _manager_conn = manager_conn;
-    wait_for_vm_ipv4(&project_root, Duration::from_secs(480))?;
+    wait_for_vm_ipv4(&project_root, Duration::from_secs(480), &manager_conn)?;
 
     let ip = load_or_create_instance_config(&project_root)?
         .vm_ipv4
@@ -207,48 +207,68 @@ pub fn extract_ipv4(line: &str) -> Option<String> {
     best
 }
 
-fn wait_for_vm_ipv4(project_dir: &Path, timeout: Duration) -> Result<()> {
+fn handle_manager_line(line: &str, last_status: &mut Option<String>) -> Result<()> {
+    if let Some(status) = line.strip_prefix(STATUS_PREFIX) {
+        let status = status.trim();
+        if let Some(message) = status.strip_prefix(STATUS_ERROR_PREFIX) {
+            let message = message.trim();
+            if message.is_empty() {
+                bail!("vm manager reported startup failure");
+            }
+            bail!(message.to_string());
+        }
+        if !status.is_empty() && last_status.as_deref() != Some(status) {
+            tracing::info!("[background]: {}", status);
+            *last_status = Some(status.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_vm_ipv4(
+    project_dir: &Path,
+    timeout: Duration,
+    manager_conn: &UnixStream,
+) -> Result<()> {
     let start = Instant::now();
     let mut next_log_at = start + Duration::from_secs(10);
-    let mut next_status_check = start;
+    let mut stream = manager_conn.try_clone()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let mut read_buf = [0u8; 1024];
+    let mut pending = String::new();
     tracing::info!("waiting for vm ipv4");
-    let status_path = project_dir.join(INSTANCE_DIR_NAME).join(STATUS_FILE_NAME);
     let mut last_status: Option<String> = None;
-    let mut status_missing = true;
     let mut once_hint = false;
     loop {
+        match stream.read(&mut read_buf) {
+            Ok(0) => {
+                bail!("vm manager disconnected before VM became ready");
+            }
+            Ok(n) => {
+                pending.push_str(&String::from_utf8_lossy(&read_buf[..n]));
+                while let Some(pos) = pending.find('\n') {
+                    let line = pending[..pos].trim().to_string();
+                    pending.drain(..=pos);
+                    handle_manager_line(&line, &mut last_status)?;
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == io::ErrorKind::TimedOut => {}
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to read vm manager status stream");
+            }
+        }
+
         let config = load_or_create_instance_config(project_dir)?;
         if config.vm_ipv4.is_some() {
-            let _ = fs::remove_file(&status_path);
             return Ok(());
         }
         if start.elapsed() > timeout {
-            let _ = fs::remove_file(&status_path);
             bail!("timed out waiting for VM IPv4");
         }
+
         let now = Instant::now();
-        if now >= next_status_check {
-            match fs::read_to_string(&status_path) {
-                Ok(status) => {
-                    status_missing = false;
-                    let status = status.trim().to_string();
-                    if status.starts_with("error:") {
-                        let _ = fs::remove_file(&status_path);
-                        let message = status.trim_start_matches("error:").trim().to_string();
-                        bail!(message);
-                    }
-                    if !status.is_empty() && last_status.as_deref() != Some(status.as_str()) {
-                        tracing::info!("[background]: {}", status);
-                        last_status = Some(status);
-                        next_log_at = now + Duration::from_secs(20);
-                    }
-                }
-                Err(_) => {
-                    status_missing = true;
-                }
-            }
-            next_status_check = now + Duration::from_millis(500);
-        }
         if now >= next_log_at {
             let waited = start.elapsed();
             if waited.as_secs() > 15 && !once_hint {
@@ -257,12 +277,9 @@ fn wait_for_vm_ipv4(project_dir: &Path, timeout: Duration) -> Result<()> {
                 );
                 once_hint = true;
             }
-            if status_missing {
-                tracing::info!("still waiting for vm ipv4, {}s elapsed", waited.as_secs(),);
-            }
+            tracing::info!("still waiting for vm ipv4, {}s elapsed", waited.as_secs(),);
             next_log_at += Duration::from_secs(20);
         }
-        thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -402,4 +419,32 @@ pub fn build_ssh_login_actions(
         .expect("ssh setup script contained invalid marker");
 
     vec![LoginAction::Send(setup)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_manager_line_updates_status() {
+        let mut last_status = None;
+        handle_manager_line("status: preparing VM image...", &mut last_status)
+            .expect("status should be accepted");
+        assert_eq!(last_status.as_deref(), Some("preparing VM image..."));
+    }
+
+    #[test]
+    fn handle_manager_line_ignores_non_status_lines() {
+        let mut last_status = None;
+        handle_manager_line("pid=123", &mut last_status).expect("non-status lines are ignored");
+        assert!(last_status.is_none());
+    }
+
+    #[test]
+    fn handle_manager_line_surfaces_error_status() {
+        let mut last_status = None;
+        let err = handle_manager_line("status: error: vm failed to boot", &mut last_status)
+            .expect_err("error status should fail");
+        assert_eq!(err.to_string(), "vm failed to boot");
+    }
 }

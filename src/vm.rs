@@ -1,4 +1,3 @@
-use crate::instance::STATUS_FILE_NAME;
 use crate::session_manager::{GLOBAL_CACHE_DIR_NAME, INSTANCE_DIR_NAME};
 use anyhow::{Context, Error, Result, bail};
 use std::{
@@ -40,32 +39,6 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVISION_EXPECT_TIMEOUT: Duration = Duration::from_secs(900);
 
-struct StatusFile {
-    path: PathBuf,
-    cleared: AtomicBool,
-}
-
-impl StatusFile {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            cleared: AtomicBool::new(false),
-        }
-    }
-
-    fn update(&self, message: &str) {
-        let _ = fs::write(&self.path, message);
-    }
-}
-
-impl Drop for StatusFile {
-    fn drop(&mut self) {
-        if !self.cleared.load(Ordering::SeqCst) {
-            let _ = fs::remove_file(&self.path);
-            self.cleared.store(true, Ordering::SeqCst);
-        }
-    }
-}
 const PROVISION_SCRIPT: &str = include_str!("provision.sh");
 const PROVISION_SCRIPT_NAME: &str = "provision.sh";
 const RESIZE_DISK_SCRIPT: &str = include_str!("resize_disk.sh");
@@ -99,7 +72,7 @@ pub struct DirectoryShare {
 impl DirectoryShare {
     pub fn new(host: PathBuf, mut guest: PathBuf, read_only: bool) -> Result<Self> {
         if !host.exists() {
-            bail!(format!("Host path does not exist: {}", host.display()));
+            bail!(format!("host path does not exist: {}", host.display()));
         }
         if !guest.is_absolute() {
             guest = PathBuf::from("/root").join(guest);
@@ -114,7 +87,7 @@ impl DirectoryShare {
     pub fn from_mount_spec(spec: &str) -> Result<Self> {
         let parts: Vec<&str> = spec.split(':').collect();
         if parts.len() < 2 || parts.len() > 3 {
-            bail!(format!("Invalid mount spec: {spec}"));
+            bail!(format!("invalid mount spec: {spec}"));
         }
         let host = expand_tilde_path(parts[0]);
         let guest = PathBuf::from(parts[1]);
@@ -170,11 +143,19 @@ pub struct VmArg {
     pub mounts: Vec<String>,
 }
 
+type StatusEmitter<'a> = dyn Fn(&str) + std::marker::Send + Sync + 'a;
+
+fn emit_status(status: Option<&StatusEmitter<'_>>, message: &str) {
+    if let Some(status) = status {
+        status(message);
+    }
+}
+
 pub fn run_with_args<F>(args: VmArg, io_handler: F) -> Result<()>
 where
     F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
 {
-    run_with_args_and_extras(args, io_handler, Vec::new(), Vec::new())
+    run_with_args_and_extras(args, io_handler, Vec::new(), Vec::new(), None)
 }
 
 pub fn run_with_args_and_extras<F>(
@@ -182,6 +163,7 @@ pub fn run_with_args_and_extras<F>(
     io_handler: F,
     extra_login_actions: Vec<LoginAction>,
     extra_directory_shares: Vec<DirectoryShare>,
+    status: Option<&StatusEmitter<'_>>,
 ) -> Result<()>
 where
     F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
@@ -204,8 +186,8 @@ where
 
     let instance_dir = project_root.join(INSTANCE_DIR_NAME);
     fs::create_dir_all(&instance_dir)?;
-    let status_file = StatusFile::new(instance_dir.join(STATUS_FILE_NAME));
-    status_file.update("preparing VM image...");
+    emit_status(status, "preparing VM image...");
+    tracing::info!("preparing VM image...");
     let provision_log = instance_dir.join("provision.log");
 
     let basename_compressed = DEBIAN_COMPRESSED_DISK_URL.rsplit('/').next().unwrap();
@@ -230,14 +212,14 @@ where
         &base_compressed,
         &default_raw,
         std::slice::from_ref(&mise_directory_share),
-        Some(&status_file),
         Some(&provision_log),
+        status,
     )?;
     let _ = ensure_instance_disk(
         &instance_raw,
         &default_raw,
         ByteSize(args.disk_bytes),
-        Some(&status_file),
+        status,
     )?;
     let base_size = fs::metadata(&default_raw)?.len();
     let instance_size = fs::metadata(&instance_raw)?.len();
@@ -283,7 +265,7 @@ where
         &directory_shares[..],
         args.cpu_count,
         args.ram_bytes,
-        Some(&status_file),
+        status,
         io_handler,
     )
 }
@@ -495,7 +477,7 @@ impl IoControl {
 fn ensure_base_image(
     base_raw: &Path,
     base_compressed: &Path,
-    status: Option<&StatusFile>,
+    status: Option<&StatusEmitter<'_>>,
 ) -> Result<()> {
     if base_raw.exists() {
         return Ok(());
@@ -504,9 +486,7 @@ fn ensure_base_image(
     if !base_compressed.exists()
         || fs::metadata(base_compressed).map(|m| m.len())? < DEBIAN_COMPRESSED_SIZE_BYTES
     {
-        if let Some(status) = status {
-            status.update("downloading base image...");
-        }
+        emit_status(status, "downloading base image...");
         tracing::info!("downloading base image");
         let status = Command::new("curl")
             .args([
@@ -521,15 +501,14 @@ fn ensure_base_image(
             ])
             .status()?;
         if !status.success() {
-            bail!("Failed to download base image");
+            bail!("failed to download base image");
         }
     }
 
     // Check SHA
     {
-        if let Some(status) = status {
-            status.update("verifying base image...");
-        }
+        emit_status(status, "verifying base image...");
+        tracing::info!("verifying base image...");
         let input = format!("{}  {}\n", DEBIAN_COMPRESSED_SHA, base_compressed.display());
 
         let mut child = Command::new("/usr/bin/shasum")
@@ -553,10 +532,8 @@ fn ensure_base_image(
         }
     }
 
-    if let Some(status) = status {
-        status.update("decompressing base image...");
-    }
-    tracing::info!("decompressing base image");
+    emit_status(status, "decompressing base image...");
+    tracing::info!("decompressing base image...");
     let status = Command::new("tar")
         .args([
             "-xOf",
@@ -578,8 +555,8 @@ fn ensure_default_image(
     base_compressed: &Path,
     default_raw: &Path,
     directory_shares: &[DirectoryShare],
-    status: Option<&StatusFile>,
     provision_log: Option<&Path>,
+    status: Option<&StatusEmitter<'_>>,
 ) -> Result<()> {
     if default_raw.exists() {
         return Ok(());
@@ -587,10 +564,8 @@ fn ensure_default_image(
 
     ensure_base_image(base_raw, base_compressed, status)?;
 
-    if let Some(status) = status {
-        status.update("configuring base image...");
-    }
-    tracing::info!("configuring base image");
+    emit_status(status, "configuring base image...");
+    tracing::info!("configuring base image...");
     fs::copy(base_raw, default_raw)?;
 
     let provision_command = script_command_from_content(PROVISION_SCRIPT_NAME, PROVISION_SCRIPT)?;
@@ -610,7 +585,7 @@ fn ensure_default_image(
             directory_shares,
             BoxConfig::default().cpu_count,
             BoxConfig::default().ram_size.as_u64(),
-            None,
+            status,
             move |output_monitor, vm_output_fd, vm_input_fd| {
                 spawn_vm_io_with_log(output_monitor, vm_output_fd, vm_input_fd, log_path)
             },
@@ -622,7 +597,7 @@ fn ensure_default_image(
             directory_shares,
             BoxConfig::default().cpu_count,
             BoxConfig::default().ram_size.as_u64(),
-            None,
+            status,
         )
     };
 
@@ -638,7 +613,7 @@ fn ensure_instance_disk(
     instance_raw: &Path,
     template_raw: &Path,
     target_bytes: ByteSize,
-    status: Option<&StatusFile>,
+    status: Option<&StatusEmitter<'_>>,
 ) -> Result<bool> {
     if instance_raw.exists() {
         let current_size = ByteSize(fs::metadata(instance_raw)?.len());
@@ -664,9 +639,8 @@ fn ensure_instance_disk(
     let target_size = target_bytes;
     let needs_resize = target_size > template_size;
 
-    if let Some(status) = status {
-        status.update("creating instance disk...");
-    }
+    emit_status(status, "creating instance disk...");
+    tracing::info!("creating instance disk...");
     tracing::info!(path = %template_raw.display(), "creating instance disk");
     fs::create_dir_all(instance_raw.parent().unwrap())?;
     if target_size == template_size {
@@ -1171,7 +1145,7 @@ fn run_vm_with_io<F>(
     directory_shares: &[DirectoryShare],
     cpu_count: usize,
     ram_bytes: u64,
-    status: Option<&StatusFile>,
+    status: Option<&StatusEmitter<'_>>,
     io_handler: F,
 ) -> Result<()>
 where
@@ -1234,9 +1208,8 @@ where
         bail!("Timed out waiting for VM to start");
     }
 
-    if let Some(status) = status {
-        status.update("vm booting... go vibecoder!");
-    }
+    emit_status(status, "vm booting... go vibecoder!");
+    tracing::info!("vm booting... go vibecoder!");
     tracing::info!("vm booting");
 
     let output_monitor = Arc::new(OutputMonitor::default());
@@ -1353,7 +1326,7 @@ fn run_vm(
     directory_shares: &[DirectoryShare],
     cpu_count: usize,
     ram_bytes: u64,
-    status: Option<&StatusFile>,
+    status: Option<&StatusEmitter<'_>>,
 ) -> Result<()> {
     run_vm_with_io(
         disk_path,

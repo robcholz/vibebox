@@ -2,7 +2,6 @@ use crate::session_manager::INSTANCE_DIR_NAME;
 use crate::utils::pid_is_alive;
 use crate::{
     config::CONFIG_PATH_ENV,
-    instance::STATUS_FILE_NAME,
     instance::{
         InstanceConfig, build_ssh_login_actions, ensure_instance_dir, ensure_ssh_keypair,
         extract_ipv4, load_or_create_instance_config, write_instance_config,
@@ -36,6 +35,11 @@ const SHUTDOWN_RETRY_MS: u64 = 500;
 const HARD_SHUTDOWN_TIMEOUT_MS: u64 = 1_000;
 #[cfg(not(test))]
 const HARD_SHUTDOWN_TIMEOUT_MS: u64 = 12_000;
+const STATUS_PREFIX: &str = "status:";
+const STATUS_ERROR_PREFIX: &str = "error:";
+
+type ClientStreams = Arc<Mutex<Vec<UnixStream>>>;
+type SharedStatus = Arc<Mutex<String>>;
 
 #[cfg(not(test))]
 fn force_exit(_reason: &str) -> ! {
@@ -402,6 +406,30 @@ fn wait_for_disconnect(mut stream: UnixStream) {
     }
 }
 
+fn remove_client(streams: &ClientStreams, fd: std::os::fd::RawFd) {
+    if let Ok(mut clients) = streams.lock() {
+        clients.retain(|stream| stream.as_raw_fd() != fd);
+    }
+}
+
+fn send_status_line(stream: &mut UnixStream, status: &str) -> bool {
+    let mut payload = String::with_capacity(STATUS_PREFIX.len() + status.len() + 1);
+    payload.push_str(STATUS_PREFIX);
+    payload.push_str(status);
+    payload.push('\n');
+    stream.write_all(payload.as_bytes()).is_ok()
+}
+
+#[cfg_attr(feature = "mock-vm", allow(dead_code))]
+fn broadcast_status(streams: &ClientStreams, latest_status: &SharedStatus, status: &str) {
+    if let Ok(mut current) = latest_status.lock() {
+        *current = status.to_string();
+    }
+    if let Ok(mut clients) = streams.lock() {
+        clients.retain_mut(|stream| send_status_line(stream, status));
+    }
+}
+
 fn send_client_pid(stream: &UnixStream) {
     let pid = std::process::id();
     let payload = format!("pid={pid}\n");
@@ -487,6 +515,8 @@ fn read_client_pid(stream: &UnixStream) -> Option<u32> {
 fn spawn_manager_io(
     config: Arc<Mutex<InstanceConfig>>,
     project_dir: PathBuf,
+    _clients: ClientStreams,
+    _latest_status: SharedStatus,
     output_monitor: Arc<vm::OutputMonitor>,
     vm_output_fd: std::os::unix::io::OwnedFd,
     vm_input_fd: std::os::unix::io::OwnedFd,
@@ -559,6 +589,7 @@ struct ManagerOptions {
 }
 
 trait VmExecutor {
+    #[allow(clippy::too_many_arguments)]
     fn run_vm(
         &self,
         args: vm::VmArg,
@@ -566,6 +597,8 @@ trait VmExecutor {
         extra_shares: Vec<DirectoryShare>,
         config: Arc<Mutex<InstanceConfig>>,
         instance_dir: PathBuf,
+        clients: ClientStreams,
+        latest_status: SharedStatus,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
     ) -> Result<()>;
 }
@@ -581,14 +614,21 @@ impl VmExecutor for RealVmExecutor {
         extra_shares: Vec<DirectoryShare>,
         config: Arc<Mutex<InstanceConfig>>,
         project_dir: PathBuf,
+        clients: ClientStreams,
+        latest_status: SharedStatus,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
     ) -> Result<()> {
+        let status_callback = |status: &str| {
+            broadcast_status(&clients, &latest_status, status);
+        };
         vm::run_with_args_and_extras(
             args,
             |output_monitor, vm_output_fd, vm_input_fd| {
                 let io_ctx = spawn_manager_io(
                     config.clone(),
-                    project_dir,
+                    project_dir.clone(),
+                    clients.clone(),
+                    latest_status.clone(),
                     output_monitor,
                     vm_output_fd,
                     vm_input_fd,
@@ -598,6 +638,7 @@ impl VmExecutor for RealVmExecutor {
             },
             extra_login_actions,
             extra_shares,
+            Some(&status_callback),
         )
     }
 }
@@ -614,6 +655,8 @@ impl VmExecutor for MockVmExecutor {
         _extra_shares: Vec<DirectoryShare>,
         _config: Arc<Mutex<InstanceConfig>>,
         _instance_dir: PathBuf,
+        _clients: ClientStreams,
+        _latest_status: SharedStatus,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
     ) -> Result<()> {
         let (tx, rx) = mpsc::channel::<VmInput>();
@@ -709,17 +752,43 @@ fn run_manager_with(
     let _ = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600));
     tracing::info!(path = %socket_path.display(), "vm manager socket bound");
 
+    let clients: ClientStreams = Arc::new(Mutex::new(Vec::new()));
+    let latest_status: SharedStatus = Arc::new(Mutex::new(String::new()));
     let (event_tx, event_rx) = mpsc::channel::<ManagerEvent>();
     let event_tx_accept = event_tx.clone();
+    let clients_accept = clients.clone();
+    let latest_status_accept = latest_status.clone();
     thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    let mut client_fd: Option<std::os::fd::RawFd> = None;
+                    let latest_status_snapshot = latest_status_accept
+                        .lock()
+                        .ok()
+                        .map(|status| status.clone());
+                    if let Ok(writer) = stream.try_clone() {
+                        let writer_fd = writer.as_raw_fd();
+                        if let Ok(mut connected) = clients_accept.lock() {
+                            connected.push(writer);
+                            client_fd = Some(writer_fd);
+                            if let Some(last) = connected.last_mut()
+                                && let Some(status) = latest_status_snapshot.as_deref()
+                                && !status.is_empty()
+                            {
+                                let _ = send_status_line(last, status);
+                            }
+                        }
+                    }
                     let event_tx_conn = event_tx_accept.clone();
+                    let clients_conn = clients_accept.clone();
                     thread::spawn(move || {
                         let pid = read_client_pid(&stream);
                         let _ = event_tx_conn.send(ManagerEvent::Inc(pid));
                         wait_for_disconnect(stream);
+                        if let Some(fd) = client_fd {
+                            remove_client(&clients_conn, fd);
+                        }
                         let _ = event_tx_conn.send(ManagerEvent::Dec(pid));
                     });
                 }
@@ -740,13 +809,18 @@ fn run_manager_with(
         extra_shares,
         config.clone(),
         project_root.to_path_buf(),
+        clients.clone(),
+        latest_status.clone(),
         vm_input_tx.clone(),
     );
     tracing::info!("vm manager vm run completed");
     let vm_err = vm_result.err().map(|e| e.to_string());
     if let Some(err) = &vm_err {
-        let status_path = instance_dir.join(STATUS_FILE_NAME);
-        let _ = fs::write(&status_path, format!("error: {err}"));
+        broadcast_status(
+            &clients,
+            &latest_status,
+            &format!("{STATUS_ERROR_PREFIX} {err}"),
+        );
     }
     let _ = event_tx.send(ManagerEvent::VmExited(vm_err.clone()));
     let event_loop_result = event_loop_handle
