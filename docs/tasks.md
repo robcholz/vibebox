@@ -25,7 +25,7 @@
 5. [x] Implement rendering functions for header, terminal area, input area, completions, and status bar.
 6. [x] Implement async event loop (keyboard, resize, tick) with crossterm EventStream + tokio.
 7. [x] Add a standalone TUI CLI binary (no main.rs wiring) with placeholder VM info and TODOs for VM integration.
-8. [ ] Run tests and validate coverage for the new module.
+8. [x] Run tests and validate coverage for the new module.
 
 ## TUI
 
@@ -49,19 +49,23 @@
    4. [x] set up the cli.
 9. [x] fix ui overlap, and consistency issue.
 10. [x] `purge-cache` to clear the cache.
-11. [ ] intensive integration test.
+11. [x] intensive integration test.
 
 ## Publish
 
-1. [ ] write the docs.
-2. [ ] setup quick install link.
-3. [ ] setup website.
+1. [x] write the docs.
+2. [x] setup quick install link.
+3. [x] setup website.
 
 ## Stage 2
 
 1. [ ] retouch the cli ux.
-2. [ ] refactor the code.
-3. [ ] Redirect vm output to log.
-4. [ ] Redirect vm output to vibebox starting it.
-5. [ ] use anyhow to sync api.
-6. [ ] add support for ipv6.
+2. [x] refactor the code.
+3. [ ] refactor the mount system.
+4. [x] refactor the vm process lifetime. 
+5. [x] Redirect vm output to log.
+6. [x] Redirect vm output to vibebox starting it.
+7. [x] use anyhow to sync api.
+8. [ ] add support for ipv6.
+9. [x] use UnixStream instead of status file
+10. [x] liveness check should also happen when waiting for ssh port

@@ -1,12 +1,22 @@
+use crate::instance::{VmLiveness, vm_liveness};
+use crate::session_manager::INSTANCE_DIR_NAME;
+use crate::{
+    config::CONFIG_PATH_ENV,
+    instance::{
+        InstanceConfig, STATUS_VM_ERROR_PREFIX, build_ssh_login_actions, ensure_instance_dir,
+        ensure_ssh_keypair, extract_ipv4, load_or_create_instance_config, write_instance_config,
+    },
+    session_manager::{GLOBAL_DIR_NAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME},
+    vm::{self, DirectoryShare, LoginAction, PROJECT_GUEST_BASE, VmInput},
+};
+use anyhow::{Error, Result, anyhow, bail};
 use std::{
     env, fs,
     io::{Read, Write},
     os::unix::{
-        fs::FileTypeExt,
         fs::PermissionsExt,
         io::AsRawFd,
         net::{UnixListener, UnixStream},
-        process::CommandExt,
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -15,20 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    config::CONFIG_PATH_ENV,
-    instance::STATUS_FILE_NAME,
-    instance::VM_ROOT_LOG_NAME,
-    instance::{
-        DEFAULT_SSH_USER, InstanceConfig, build_ssh_login_actions, ensure_instance_dir,
-        ensure_ssh_keypair, extract_ipv4, load_or_create_instance_config, write_instance_config,
-    },
-    session_manager::{
-        GLOBAL_DIR_NAME, INSTANCE_FILENAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME,
-    },
-    vm::{self, DirectoryShare, LoginAction, PROJECT_GUEST_BASE, VmInput},
-};
-
+#[cfg_attr(feature = "mock-vm", allow(dead_code))]
+const VM_ROOT_LOG_NAME: &str = "vm_root.log";
 const VM_MANAGER_LOCK_NAME: &str = "vm.lock";
 const VM_MANAGER_LOG_NAME: &str = "vm_manager.log";
 const SHUTDOWN_RETRY_MS: u64 = 500;
@@ -36,6 +34,10 @@ const SHUTDOWN_RETRY_MS: u64 = 500;
 const HARD_SHUTDOWN_TIMEOUT_MS: u64 = 1_000;
 #[cfg(not(test))]
 const HARD_SHUTDOWN_TIMEOUT_MS: u64 = 12_000;
+const STATUS_PREFIX: &str = "status:";
+
+type ClientStreams = Arc<Mutex<Vec<UnixStream>>>;
+type SharedStatus = Arc<Mutex<String>>;
 
 #[cfg(not(test))]
 fn force_exit(_reason: &str) -> ! {
@@ -51,16 +53,16 @@ pub fn ensure_manager(
     raw_args: &[std::ffi::OsString],
     auto_shutdown_ms: u64,
     config_path: Option<&Path>,
-) -> Result<UnixStream, Box<dyn std::error::Error>> {
+) -> Result<UnixStream> {
     let project_root = env::current_dir()?;
     tracing::debug!(root = %project_root.display(), "ensure vm manager");
     let instance_dir = ensure_instance_dir(&project_root)?;
-    cleanup_stale_manager(&instance_dir);
+    cleanup_stale_manager(&project_root)?;
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
 
     if let Ok(stream) = UnixStream::connect(&socket_path) {
         send_client_pid(&stream);
-        tracing::info!(path = %socket_path.display(), "connected to existing vm manager");
+        tracing::info!(path = %socket_path.display(), "connected to an existing vm manager");
         return Ok(stream);
     }
 
@@ -98,12 +100,11 @@ pub fn ensure_manager(
                         drop(lock_file.take());
                         let _ = fs::remove_file(&lock_path);
                     }
-                    return Err(format!(
-                        "Timed out waiting for vm manager socket: {} ({})",
+                    bail!(format!(
+                        "timed out waiting for vm manager socket: {} ({})",
                         socket_path.display(),
                         err
-                    )
-                    .into());
+                    ));
                 }
                 thread::sleep(Duration::from_millis(100));
             }
@@ -111,12 +112,19 @@ pub fn ensure_manager(
     }
 }
 
-pub fn run_manager(
-    args: vm::VmArg,
-    auto_shutdown_ms: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_manager(args: vm::VmArg, auto_shutdown_ms: u64) -> Result<()> {
     let project_root = env::current_dir()?;
     tracing::info!(root = %project_root.display(), "vm manager starting");
+    #[cfg(not(feature = "mock-vm"))]
+    {
+        unsafe {
+            env::remove_var("VIBEBOX_SKIP_CODESIGN");
+        }
+        vm::ensure_signed();
+        unsafe {
+            env::set_var("VIBEBOX_SKIP_CODESIGN", "1");
+        }
+    }
     let _pid_guard = ensure_pid_file(&project_root)?;
     #[cfg(feature = "mock-vm")]
     tracing::info!("vm manager using mock executor");
@@ -134,7 +142,6 @@ pub fn run_manager(
         #[cfg(feature = "mock-vm")]
         {
             ManagerOptions {
-                ensure_signed: false,
                 detach: true,
                 prepare_vm: false,
             }
@@ -142,7 +149,6 @@ pub fn run_manager(
         #[cfg(not(feature = "mock-vm"))]
         {
             ManagerOptions {
-                ensure_signed: true,
                 detach: true,
                 prepare_vm: true,
             }
@@ -156,25 +162,22 @@ fn spawn_manager_process(
     auto_shutdown_ms: u64,
     instance_dir: &Path,
     config_path: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let exe = env::current_exe()?;
     let mut supervisor_exe = exe.clone();
     supervisor_exe.set_file_name("vibebox-supervisor");
-    let use_supervisor = supervisor_exe.exists();
-    let mut cmd = if use_supervisor {
-        Command::new(supervisor_exe)
-    } else {
-        let mut cmd = Command::new(exe);
-        cmd.arg0("vibebox-supervisor");
-        cmd
-    };
+    // intentional
+    if !supervisor_exe.exists() {
+        bail!(format!(
+            "vibebox-supervisor not found at {}",
+            supervisor_exe.display()
+        ));
+    }
+    let mut cmd = Command::new(supervisor_exe);
     if raw_args.len() > 1 {
         cmd.args(&raw_args[1..]);
     }
     cmd.env("VIBEBOX_INTERNAL", "1");
-    if !use_supervisor {
-        cmd.env("VIBEBOX_VM_MANAGER", "1");
-    }
     cmd.env("VIBEBOX_LOG_NO_COLOR", "1");
     cmd.env("VIBEBOX_AUTO_SHUTDOWN_MS", auto_shutdown_ms.to_string());
     if let Some(path) = config_path {
@@ -202,22 +205,22 @@ fn spawn_manager_process(
     Ok(())
 }
 
-fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard, Box<dyn std::error::Error>> {
+fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard> {
     let instance_dir = ensure_instance_dir(project_root)?;
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
-    if let Ok(content) = fs::read_to_string(&pid_path)
-        && let Ok(pid) = content.trim().parse::<u32>()
-        && pid_is_alive(pid)
-    {
-        if is_socket_path(&socket_path) {
-            return Err(format!("vm manager already running (pid {pid})").into());
+    match vm_liveness(project_root)? {
+        VmLiveness::RunningWithSocket { pid } => {
+            bail!("vm manager already running (pid {pid})");
         }
-        tracing::warn!(
-            pid,
-            path = %socket_path.display(),
-            "stale pid file detected with missing socket"
-        );
+        VmLiveness::RunningWithoutSocket { pid } => {
+            tracing::warn!(
+                pid,
+                path = %socket_path.display(),
+                "stale pid file detected with missing socket"
+            );
+        }
+        VmLiveness::NotRunningOrMissing => {}
     }
     let _ = fs::remove_file(&pid_path);
     fs::write(&pid_path, format!("{}\n", std::process::id()))?;
@@ -225,15 +228,18 @@ fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard, Box<dyn std::err
     Ok(PidFileGuard { path: pid_path })
 }
 
-fn cleanup_stale_manager(instance_dir: &Path) {
-    let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
-    if let Ok(content) = fs::read_to_string(&pid_path)
-        && let Ok(pid) = content.trim().parse::<u32>()
-        && pid_is_alive(pid)
-    {
-        return;
+fn cleanup_stale_manager(project_root: &Path) -> Result<()> {
+    let pid_path = project_root
+        .join(INSTANCE_DIR_NAME)
+        .join(VM_MANAGER_PID_NAME);
+    if matches!(
+        vm_liveness(project_root)?,
+        VmLiveness::RunningWithSocket { .. } | VmLiveness::RunningWithoutSocket { .. }
+    ) {
+        return Ok(());
     }
     let _ = fs::remove_file(&pid_path);
+    Ok(())
 }
 
 fn inject_project_mount(
@@ -258,12 +264,6 @@ fn inject_project_mount(
     }
     let host = project_root.display();
     mounts.insert(0, format!("{host}:{guest_tilde}:read-write"));
-}
-
-fn is_socket_path(path: &Path) -> bool {
-    fs::metadata(path)
-        .map(|meta| meta.file_type().is_socket())
-        .unwrap_or(false)
 }
 
 fn prepare_mounts_and_links(mut args: vm::VmArg, ssh_user: &str) -> (vm::VmArg, String) {
@@ -409,6 +409,30 @@ fn wait_for_disconnect(mut stream: UnixStream) {
     }
 }
 
+fn remove_client(streams: &ClientStreams, fd: std::os::fd::RawFd) {
+    if let Ok(mut clients) = streams.lock() {
+        clients.retain(|stream| stream.as_raw_fd() != fd);
+    }
+}
+
+fn send_status_line(stream: &mut UnixStream, status: &str) -> bool {
+    let mut payload = String::with_capacity(STATUS_PREFIX.len() + status.len() + 1);
+    payload.push_str(STATUS_PREFIX);
+    payload.push_str(status);
+    payload.push('\n');
+    stream.write_all(payload.as_bytes()).is_ok()
+}
+
+#[cfg_attr(feature = "mock-vm", allow(dead_code))]
+fn broadcast_status(streams: &ClientStreams, latest_status: &SharedStatus, status: &str) {
+    if let Ok(mut current) = latest_status.lock() {
+        *current = status.to_string();
+    }
+    if let Ok(mut clients) = streams.lock() {
+        clients.retain_mut(|stream| send_status_line(stream, status));
+    }
+}
+
 fn send_client_pid(stream: &UnixStream) {
     let pid = std::process::id();
     let payload = format!("pid={pid}\n");
@@ -418,7 +442,7 @@ fn send_client_pid(stream: &UnixStream) {
     }
 }
 
-fn acquire_spawn_lock(lock_path: &Path) -> Result<Option<fs::File>, Box<dyn std::error::Error>> {
+fn acquire_spawn_lock(lock_path: &Path) -> Result<Option<fs::File>> {
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -445,24 +469,12 @@ fn acquire_spawn_lock(lock_path: &Path) -> Result<Option<fs::File>, Box<dyn std:
     }
 }
 
-fn is_lock_stale(lock_path: &Path) -> bool {
-    match read_lock_pid(lock_path) {
-        Some(pid) => !pid_is_alive(pid),
-        None => true,
+fn is_lock_stale(project_root: &Path) -> bool {
+    let liveness = vm_liveness(project_root);
+    if liveness.is_err() {
+        return false;
     }
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    let pid = pid as libc::pid_t;
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-    match std::io::Error::last_os_error().raw_os_error() {
-        Some(code) if code == libc::EPERM => true,
-        Some(code) if code == libc::ESRCH => false,
-        _ => false,
-    }
+    matches!(liveness.unwrap(), VmLiveness::NotRunningOrMissing)
 }
 
 fn read_lock_pid(lock_path: &Path) -> Option<u32> {
@@ -506,12 +518,14 @@ fn read_client_pid(stream: &UnixStream) -> Option<u32> {
 #[cfg_attr(feature = "mock-vm", allow(dead_code))]
 fn spawn_manager_io(
     config: Arc<Mutex<InstanceConfig>>,
-    instance_dir: PathBuf,
+    project_dir: PathBuf,
+    clients: ClientStreams,
+    latest_status: SharedStatus,
     output_monitor: Arc<vm::OutputMonitor>,
     vm_output_fd: std::os::unix::io::OwnedFd,
     vm_input_fd: std::os::unix::io::OwnedFd,
 ) -> vm::IoContext {
-    let log_path = instance_dir.join(VM_ROOT_LOG_NAME);
+    let log_path = project_dir.join(INSTANCE_DIR_NAME).join(VM_ROOT_LOG_NAME);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -520,7 +534,6 @@ fn spawn_manager_io(
         .ok()
         .map(|file| Arc::new(Mutex::new(file)));
 
-    let instance_path = instance_dir.join(INSTANCE_FILENAME);
     let config_for_output = config.clone();
     let log_for_output = log_file.clone();
     let mut line_buf = String::new();
@@ -543,6 +556,17 @@ fn spawn_manager_io(
             line_buf.drain(..=pos);
 
             let cleaned = line.trim_start_matches(['\r', ' ']);
+            if let Some(script_failure) = cleaned.strip_prefix("VIBEBOX_SCRIPT_ERROR:") {
+                let failure = script_failure.trim();
+                if !failure.is_empty() {
+                    tracing::error!(script_failure = %failure, "[vm] script reported failure");
+                    broadcast_status(
+                        &clients,
+                        &latest_status,
+                        &format!("{STATUS_VM_ERROR_PREFIX} {failure}"),
+                    );
+                }
+            }
             if let Some(pos) = cleaned.find("VIBEBOX_IPV4=") {
                 let ip_raw = &cleaned[(pos + "VIBEBOX_IPV4=".len())..];
                 let ip = extract_ipv4(ip_raw).unwrap_or_default();
@@ -551,7 +575,7 @@ fn spawn_manager_io(
                     && cfg.vm_ipv4.as_deref() != Some(ip.as_str())
                 {
                     cfg.vm_ipv4 = Some(ip.clone());
-                    let _ = write_instance_config(&instance_path, &cfg);
+                    let _ = write_instance_config(&project_dir, &cfg);
                 }
             }
         }
@@ -574,12 +598,12 @@ enum ManagerEvent {
 }
 
 struct ManagerOptions {
-    ensure_signed: bool,
     detach: bool,
     prepare_vm: bool,
 }
 
 trait VmExecutor {
+    #[allow(clippy::too_many_arguments)]
     fn run_vm(
         &self,
         args: vm::VmArg,
@@ -587,8 +611,10 @@ trait VmExecutor {
         extra_shares: Vec<DirectoryShare>,
         config: Arc<Mutex<InstanceConfig>>,
         instance_dir: PathBuf,
+        clients: ClientStreams,
+        latest_status: SharedStatus,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
-    ) -> Result<(), Box<dyn std::error::Error>>;
+    ) -> Result<()>;
 }
 
 #[cfg_attr(feature = "mock-vm", allow(dead_code))]
@@ -601,15 +627,22 @@ impl VmExecutor for RealVmExecutor {
         extra_login_actions: Vec<LoginAction>,
         extra_shares: Vec<DirectoryShare>,
         config: Arc<Mutex<InstanceConfig>>,
-        instance_dir: PathBuf,
+        project_dir: PathBuf,
+        clients: ClientStreams,
+        latest_status: SharedStatus,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
+        let status_callback = |status: &str| {
+            broadcast_status(&clients, &latest_status, status);
+        };
         vm::run_with_args_and_extras(
             args,
             |output_monitor, vm_output_fd, vm_input_fd| {
                 let io_ctx = spawn_manager_io(
                     config.clone(),
-                    instance_dir.clone(),
+                    project_dir.clone(),
+                    clients.clone(),
+                    latest_status.clone(),
                     output_monitor,
                     vm_output_fd,
                     vm_input_fd,
@@ -619,6 +652,7 @@ impl VmExecutor for RealVmExecutor {
             },
             extra_login_actions,
             extra_shares,
+            Some(&status_callback),
         )
     }
 }
@@ -635,8 +669,10 @@ impl VmExecutor for MockVmExecutor {
         _extra_shares: Vec<DirectoryShare>,
         _config: Arc<Mutex<InstanceConfig>>,
         _instance_dir: PathBuf,
+        _clients: ClientStreams,
+        _latest_status: SharedStatus,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         let (tx, rx) = mpsc::channel::<VmInput>();
         *vm_input_tx.lock().unwrap() = Some(tx);
         tracing::info!("mock vm executor running");
@@ -662,24 +698,14 @@ fn run_manager_with(
     auto_shutdown_ms: u64,
     executor: &dyn VmExecutor,
     options: ManagerOptions,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if options.ensure_signed {
-        let _had_skip = env::var("VIBEBOX_SKIP_CODESIGN").ok();
-        unsafe {
-            env::remove_var("VIBEBOX_SKIP_CODESIGN");
-        }
-        vm::ensure_signed();
-        unsafe {
-            env::set_var("VIBEBOX_SKIP_CODESIGN", "1");
-        }
-    }
+) -> Result<()> {
     if options.detach {
         detach_from_terminal();
     }
 
     let project_name = project_root
         .file_name()
-        .ok_or("Project directory has no name")?
+        .ok_or_else(|| anyhow!("Project directory has no name"))?
         .to_string_lossy()
         .into_owned();
     let instance_dir = ensure_instance_dir(project_root)?;
@@ -687,16 +713,16 @@ fn run_manager_with(
         let _ = ensure_ssh_keypair(&instance_dir)?;
     }
 
-    let mut config = load_or_create_instance_config(&instance_dir)?;
+    let mut config = load_or_create_instance_config(project_root)?;
     if config.vm_ipv4.is_some() {
         config.vm_ipv4 = None;
-        write_instance_config(&instance_dir.join(INSTANCE_FILENAME), &config)?;
+        write_instance_config(project_root, &config)?;
     }
     let config = Arc::new(Mutex::new(config));
     let ssh_user = config
         .lock()
-        .map(|cfg| cfg.ssh_user_display())
-        .unwrap_or_else(|_| DEFAULT_SSH_USER.to_string());
+        .map(|cfg| cfg.ssh_user.clone())
+        .map_err(|_| anyhow!("failed to acquire ssh user display"))?;
     if !args.no_default_mounts {
         inject_project_mount(&mut args.mounts, project_root, &ssh_user, &project_name);
     }
@@ -704,11 +730,10 @@ fn run_manager_with(
 
     let project_guest_dir = format!("{PROJECT_GUEST_BASE}/{project_name}");
     let ssh_guest_dir = format!("/root/{}", GLOBAL_DIR_NAME);
-    let extra_shares = vec![DirectoryShare::new(
-        instance_dir.clone(),
-        ssh_guest_dir.clone().into(),
-        true,
-    )?];
+    let extra_shares = vec![
+        DirectoryShare::new(instance_dir.clone(), ssh_guest_dir.clone().into(), true)
+            .map_err(|err| anyhow!(err.to_string()))?,
+    ];
     let extra_login_actions = build_ssh_login_actions(
         &config,
         &project_name,
@@ -731,17 +756,43 @@ fn run_manager_with(
     let _ = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600));
     tracing::info!(path = %socket_path.display(), "vm manager socket bound");
 
+    let clients: ClientStreams = Arc::new(Mutex::new(Vec::new()));
+    let latest_status: SharedStatus = Arc::new(Mutex::new(String::new()));
     let (event_tx, event_rx) = mpsc::channel::<ManagerEvent>();
     let event_tx_accept = event_tx.clone();
+    let clients_accept = clients.clone();
+    let latest_status_accept = latest_status.clone();
     thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    let mut client_fd: Option<std::os::fd::RawFd> = None;
+                    let latest_status_snapshot = latest_status_accept
+                        .lock()
+                        .ok()
+                        .map(|status| status.clone());
+                    if let Ok(writer) = stream.try_clone() {
+                        let writer_fd = writer.as_raw_fd();
+                        if let Ok(mut connected) = clients_accept.lock() {
+                            connected.push(writer);
+                            client_fd = Some(writer_fd);
+                            if let Some(last) = connected.last_mut()
+                                && let Some(status) = latest_status_snapshot.as_deref()
+                                && !status.is_empty()
+                            {
+                                let _ = send_status_line(last, status);
+                            }
+                        }
+                    }
                     let event_tx_conn = event_tx_accept.clone();
+                    let clients_conn = clients_accept.clone();
                     thread::spawn(move || {
                         let pid = read_client_pid(&stream);
                         let _ = event_tx_conn.send(ManagerEvent::Inc(pid));
                         wait_for_disconnect(stream);
+                        if let Some(fd) = client_fd {
+                            remove_client(&clients_conn, fd);
+                        }
                         let _ = event_tx_conn.send(ManagerEvent::Dec(pid));
                     });
                 }
@@ -761,38 +812,43 @@ fn run_manager_with(
         extra_login_actions,
         extra_shares,
         config.clone(),
-        instance_dir.clone(),
+        project_root.to_path_buf(),
+        clients.clone(),
+        latest_status.clone(),
         vm_input_tx.clone(),
     );
     tracing::info!("vm manager vm run completed");
     let vm_err = vm_result.err().map(|e| e.to_string());
     if let Some(err) = &vm_err {
-        let status_path = instance_dir.join(STATUS_FILE_NAME);
-        let _ = fs::write(&status_path, format!("error: {err}"));
+        broadcast_status(
+            &clients,
+            &latest_status,
+            &format!("{STATUS_VM_ERROR_PREFIX} {err}"),
+        );
     }
     let _ = event_tx.send(ManagerEvent::VmExited(vm_err.clone()));
-    let event_loop_result: Result<(), String> = event_loop_handle
+    let event_loop_result = event_loop_handle
         .join()
-        .unwrap_or_else(|_| Err("vm manager event loop panicked".into()))
+        .unwrap_or_else(|_| Err(Error::msg("vm manager event loop panicked")))
         .map_err(|err| err.to_string());
     let _ = fs::remove_file(&socket_path);
     if let Err(err) = &event_loop_result {
         tracing::error!(error = %err, "vm manager exiting due to event loop error");
-        return Err(err.to_string().into());
+        bail!(err.to_string());
     }
     if let Some(err) = vm_err {
         tracing::error!(error = %err, "vm manager exiting due to vm error");
-        return Err(err.into());
+        bail!(err);
     }
     tracing::info!("vm manager exiting");
-    Ok(event_loop_result?)
+    event_loop_result.map_err(Error::msg)
 }
 
 fn manager_event_loop(
     event_rx: mpsc::Receiver<ManagerEvent>,
     vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
     auto_shutdown_ms: u64,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut ref_count: usize = 0;
     let mut shutdown_deadline: Option<Instant> = None;
     let mut shutdown_sent = false;

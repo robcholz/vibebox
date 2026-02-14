@@ -1,3 +1,7 @@
+use bytesize::ByteSize;
+use clap::Parser;
+use color_eyre::Result;
+use dialoguer::Confirm;
 use std::{
     env,
     ffi::OsString,
@@ -6,10 +10,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-
-use clap::Parser;
-use color_eyre::Result;
-use dialoguer::Confirm;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing_subscriber::filter::LevelFilter;
@@ -17,8 +17,9 @@ use tracing_subscriber::registry::Registry;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 
 use vibebox::tui::{AppState, VmInfo};
+use vibebox::utils::relative_to_home;
 use vibebox::{
-    SessionManager, commands, config, explain, instance, session_manager, tui, vm, vm_manager,
+    SessionManager, commands, config, explain, instance, session_manager, tui, vm_manager,
 };
 
 #[derive(Debug, Parser)]
@@ -56,53 +57,26 @@ fn main() -> Result<()> {
 
     let config_override = cli.config.clone();
     let raw_args: Vec<OsString> = env::args_os().collect();
-    let config = config::load_config_with_path(&cwd, config_override.as_deref());
+    let config = config::load_config_with_path(&cwd, config_override.as_deref())
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
 
-    if env::var("VIBEBOX_VM_MANAGER").as_deref() == Ok("1") {
-        tracing::info!("starting vm manager mode");
-        let args = vm::VmArg {
-            cpu_count: config.box_cfg.cpu_count,
-            ram_bytes: config.box_cfg.ram_mb.saturating_mul(1024 * 1024),
-            disk_bytes: config.box_cfg.disk_gb.saturating_mul(1024 * 1024 * 1024),
-            no_default_mounts: false,
-            mounts: config.box_cfg.mounts.clone(),
-        };
-        let auto_shutdown_ms = config.supervisor.auto_shutdown_ms;
-        tracing::info!(auto_shutdown_ms, "vm manager config");
-        if let Err(err) = vm_manager::run_manager(args, auto_shutdown_ms) {
-            tracing::error!(error = %err, "vm manager exited");
-            return Err(color_eyre::eyre::eyre!(err.to_string()));
-        }
-        return Ok(());
-    }
-
-    vm::ensure_signed();
-
-    let vm_args = vm::VmArg {
-        cpu_count: config.box_cfg.cpu_count,
-        ram_bytes: config.box_cfg.ram_mb.saturating_mul(1024 * 1024),
-        disk_bytes: config.box_cfg.disk_gb.saturating_mul(1024 * 1024 * 1024),
-        no_default_mounts: false,
-        mounts: config.box_cfg.mounts.clone(),
-    };
-    let auto_shutdown_ms = config.supervisor.auto_shutdown_ms;
     let vm_info = VmInfo {
-        max_memory_mb: vm_args.ram_bytes / (1024 * 1024),
-        cpu_cores: vm_args.cpu_count,
-        max_disk_gb: (vm_args.disk_bytes as f32) / 1024.0 / 1024.0 / 1024.0,
+        max_memory: config.box_cfg.ram_size,
+        cpu_cores: config.box_cfg.cpu_count,
+        max_disk: config.box_cfg.disk_size,
         system_name: "Debian".to_string(), // TODO: read system name from the VM.
-        auto_shutdown_ms,
+        auto_shutdown_ms: config.supervisor.auto_shutdown_ms,
     };
     if let Ok(manager) = SessionManager::new() {
         if let Err(err) = manager.update_global_sessions(&cwd) {
             tracing::warn!(error = %err, "failed to update a global session list");
         }
     } else {
-        tracing::warn!("failed to initialize session manager");
+        tracing::error!("failed to initialize session manager");
+        std::process::exit(1);
     }
     let commands = commands::build_commands();
     let app = Arc::new(Mutex::new(AppState::new(cwd.clone(), vm_info, commands)));
-
     {
         let mut locked = app.lock().expect("app state poisoned");
         tui::render_tui_once(&mut locked)?;
@@ -112,23 +86,37 @@ fn main() -> Result<()> {
         writeln!(stdout)?;
         stdout.flush()?;
     }
-    warn_disk_size_mismatch(&cwd, vm_args.disk_bytes);
+    warn_disk_size_mismatch(&cwd, config.box_cfg.disk_size);
     if let Some(handle) = stderr_handle {
         let _ = handle.modify(|filter| *filter = LevelFilter::INFO);
     }
 
-    tracing::debug!(auto_shutdown_ms, "auto shutdown config");
-    let manager_conn =
-        vm_manager::ensure_manager(&raw_args, auto_shutdown_ms, config_override.as_deref())
-            .map_err(|err| {
-                tracing::error!(error = %err, "failed to ensure vm manager");
-                color_eyre::eyre::eyre!(err.to_string())
-            })?;
-
-    instance::run_with_ssh(manager_conn).map_err(|err| {
+    tracing::debug!(config.supervisor.auto_shutdown_ms, "auto shutdown config");
+    let manager_conn = vm_manager::ensure_manager(
+        &raw_args,
+        config.supervisor.auto_shutdown_ms,
+        config_override.as_deref(),
+    )
+    .map_err(|err| {
         tracing::error!(error = %err, "failed to ensure vm manager");
         color_eyre::eyre::eyre!(err.to_string())
     })?;
+
+    if let Err(err) = instance::run_with_ssh(manager_conn) {
+        if let Some(instance::InstanceError::UnexpectedDisconnection) =
+            err.downcast_ref::<instance::InstanceError>()
+        {
+            tracing::warn!("vm manager disconnected; exiting vibebox");
+        } else if let Some(instance::InstanceError::VMError(vm_error)) =
+            err.downcast_ref::<instance::InstanceError>()
+        {
+            tracing::error!("[vm]: {vm_error}");
+        } else {
+            let message = err.to_string();
+            tracing::error!(error = %message, "vibebox exited: uncaught error");
+            return Err(color_eyre::eyre::eyre!(message));
+        }
+    }
 
     tracing::info!("See you again — keep vibecoding (no SEVs, only vibes) 😈");
 
@@ -211,13 +199,14 @@ fn handle_command(command: Command, cwd: &Path, config_override: Option<&Path>) 
                 "Purged {} file{} totaling {} from {}",
                 file_count,
                 if file_count == 1 { "" } else { "s" },
-                format_bytes(total_bytes),
+                ByteSize(total_bytes),
                 cache_dir.display()
             );
             Ok(())
         }
         Command::Explain => {
-            let config = config::load_config_with_path(cwd, config_override);
+            let config = config::load_config_with_path(cwd, config_override)
+                .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
             let mounts = explain::build_mount_rows(cwd, &config)
                 .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
             let networks = explain::build_network_rows(cwd)
@@ -238,20 +227,6 @@ fn project_name(directory: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("-")
         .to_string()
-}
-
-fn relative_to_home(directory: &Path) -> String {
-    let Ok(home) = env::var("HOME") else {
-        return directory.display().to_string();
-    };
-    let home_path = PathBuf::from(home);
-    if let Ok(stripped) = directory.strip_prefix(&home_path) {
-        if stripped.components().next().is_none() {
-            return "~".to_string();
-        }
-        return format!("~/{}", stripped.display());
-    }
-    directory.display().to_string()
 }
 
 fn cache_dir() -> Result<PathBuf> {
@@ -302,23 +277,6 @@ fn measure_dir(path: &Path) -> Result<(u64, u64)> {
     Ok((file_count, total_bytes))
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.2} GB", b / GB)
-    } else if b >= MB {
-        format!("{:.1} MB", b / MB)
-    } else if b >= KB {
-        format!("{:.1} KB", b / KB)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
 fn format_last_active(value: Option<&str>) -> String {
     let Some(raw) = value else {
         return "-".to_string();
@@ -360,24 +318,22 @@ fn format_last_active(value: Option<&str>) -> String {
     format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
 }
 
-fn warn_disk_size_mismatch(cwd: &Path, configured_bytes: u64) {
+fn warn_disk_size_mismatch(cwd: &Path, configured_size: ByteSize) {
     let instance_raw = cwd
         .join(session_manager::INSTANCE_DIR_NAME)
         .join("instance.raw");
     let Ok(meta) = fs::metadata(&instance_raw) else {
         return;
     };
-    let current_bytes = meta.len();
-    if current_bytes == configured_bytes {
+    let current_size = ByteSize::b(meta.len());
+    if current_size == configured_size {
         return;
     }
-    let current_gb = current_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    let target_gb = configured_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     tracing::warn!(
-        "instance disk size does not match config (current {:.2} GB, config {:.2} GB). \
+        "instance disk size does not match config (current {}, config {}). \
 disk_gb applies only on init. Run `vibebox reset` to recreate or set disk_gb to match; using the existing disk.",
-        current_gb,
-        target_gb
+        current_size,
+        configured_size,
     );
 }
 
@@ -386,13 +342,13 @@ type StderrHandle = reload::Handle<LevelFilter, Registry>;
 fn init_tracing(cwd: &Path) -> Option<StderrHandle> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
     let file_filter = filter.clone();
-    let stderr_is_tty = std::io::stderr().is_terminal();
+    let stderr_is_tty = io::stderr().is_terminal();
     let ansi = stderr_is_tty && env::var("VIBEBOX_LOG_NO_COLOR").is_err();
     let file = instance::ensure_instance_dir(cwd)
         .ok()
         .and_then(|instance_dir| {
             let log_path = instance_dir.join("cli.log");
-            std::fs::OpenOptions::new()
+            fs::OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
@@ -406,7 +362,7 @@ fn init_tracing(cwd: &Path) -> Option<StderrHandle> {
             .with_target(false)
             .with_ansi(ansi)
             .without_time()
-            .with_writer(std::io::stderr)
+            .with_writer(io::stderr)
             .with_filter(stderr_filter);
         let subscriber = tracing_subscriber::registry().with(stderr_layer);
         if let Some(file) = file {
@@ -424,7 +380,7 @@ fn init_tracing(cwd: &Path) -> Option<StderrHandle> {
         let stderr_layer = fmt::layer()
             .with_target(false)
             .with_ansi(ansi)
-            .with_writer(std::io::stderr)
+            .with_writer(io::stderr)
             .with_filter(filter);
         let subscriber = tracing_subscriber::registry().with(stderr_layer);
         if let Some(file) = file {

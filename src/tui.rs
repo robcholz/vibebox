@@ -1,10 +1,4 @@
-use std::{
-    io::{self, Write},
-    os::unix::io::OwnedFd,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
-
+use bytesize::ByteSize;
 use color_eyre::Result;
 use crossterm::{
     cursor::{MoveTo, Show},
@@ -21,6 +15,12 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Widget},
+};
+use std::{
+    io::{self, Write},
+    os::unix::io::OwnedFd,
+    path::PathBuf,
+    sync::{Arc, Mutex},
 };
 
 use crate::vm;
@@ -39,9 +39,9 @@ const INFO_LINE_COUNT: u16 = 5;
 
 #[derive(Debug, Clone)]
 pub struct VmInfo {
-    pub max_memory_mb: u64,
+    pub max_memory: ByteSize,
     pub cpu_cores: usize,
-    pub max_disk_gb: f32,
+    pub max_disk: ByteSize,
     pub system_name: String,
     pub auto_shutdown_ms: u64,
 }
@@ -474,27 +474,27 @@ fn write_buffer_with_style(buffer: &Buffer, out: &mut impl Write) -> io::Result<
     Ok(())
 }
 
-fn map_color(color: ratatui::style::Color) -> CrosstermColor {
+fn map_color(color: Color) -> CrosstermColor {
     match color {
-        ratatui::style::Color::Reset => CrosstermColor::Reset,
-        ratatui::style::Color::Black => CrosstermColor::Black,
-        ratatui::style::Color::Red => CrosstermColor::DarkRed,
-        ratatui::style::Color::Green => CrosstermColor::DarkGreen,
-        ratatui::style::Color::Yellow => CrosstermColor::DarkYellow,
-        ratatui::style::Color::Blue => CrosstermColor::DarkBlue,
-        ratatui::style::Color::Magenta => CrosstermColor::DarkMagenta,
-        ratatui::style::Color::Cyan => CrosstermColor::DarkCyan,
-        ratatui::style::Color::Gray => CrosstermColor::Grey,
-        ratatui::style::Color::DarkGray => CrosstermColor::DarkGrey,
-        ratatui::style::Color::LightRed => CrosstermColor::Red,
-        ratatui::style::Color::LightGreen => CrosstermColor::Green,
-        ratatui::style::Color::LightYellow => CrosstermColor::Yellow,
-        ratatui::style::Color::LightBlue => CrosstermColor::Blue,
-        ratatui::style::Color::LightMagenta => CrosstermColor::Magenta,
-        ratatui::style::Color::LightCyan => CrosstermColor::Cyan,
-        ratatui::style::Color::White => CrosstermColor::White,
-        ratatui::style::Color::Rgb(r, g, b) => CrosstermColor::Rgb { r, g, b },
-        ratatui::style::Color::Indexed(i) => CrosstermColor::AnsiValue(i),
+        Color::Reset => CrosstermColor::Reset,
+        Color::Black => CrosstermColor::Black,
+        Color::Red => CrosstermColor::DarkRed,
+        Color::Green => CrosstermColor::DarkGreen,
+        Color::Yellow => CrosstermColor::DarkYellow,
+        Color::Blue => CrosstermColor::DarkBlue,
+        Color::Magenta => CrosstermColor::DarkMagenta,
+        Color::Cyan => CrosstermColor::DarkCyan,
+        Color::Gray => CrosstermColor::Grey,
+        Color::DarkGray => CrosstermColor::DarkGrey,
+        Color::LightRed => CrosstermColor::Red,
+        Color::LightGreen => CrosstermColor::Green,
+        Color::LightYellow => CrosstermColor::Yellow,
+        Color::LightBlue => CrosstermColor::Blue,
+        Color::LightMagenta => CrosstermColor::Magenta,
+        Color::LightCyan => CrosstermColor::Cyan,
+        Color::White => CrosstermColor::White,
+        Color::Rgb(r, g, b) => CrosstermColor::Rgb { r, g, b },
+        Color::Indexed(i) => CrosstermColor::AnsiValue(i),
     }
 }
 
@@ -574,8 +574,8 @@ fn render_header(buffer: &mut Buffer, area: Rect, app: &AppState) {
             Span::raw("CPU / Memory / Disk: "),
             Span::styled(
                 format!(
-                    "{} cores / {} MB / {} GB",
-                    app.vm_info.cpu_cores, app.vm_info.max_memory_mb, app.vm_info.max_disk_gb
+                    "{} cores / {} / {}",
+                    app.vm_info.cpu_cores, app.vm_info.max_memory, app.vm_info.max_disk
                 ),
                 Style::default().fg(Color::Green),
             ),
