@@ -1067,7 +1067,7 @@ fn create_vm_configuration(
         // Validate
         config.validateWithError().map_err(|e| {
             io::Error::other(format!(
-                "Invalid VM configuration: {:?}",
+                "invalid VM configuration: {:?}",
                 e.localizedDescription()
             ))
         })?;
@@ -1348,7 +1348,7 @@ fn nsurl_from_path(path: &Path) -> Result<Retained<NSURL>> {
     let ns_path = NSString::from_str(
         abs_path
             .to_str()
-            .with_context(|| "Non-UTF8 path encountered while building NSURL")?,
+            .with_context(|| "non-UTF8 path encountered while building NSURL")?,
     );
     Ok(NSURL::fileURLWithPath(&ns_path))
 }

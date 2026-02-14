@@ -64,7 +64,7 @@ pub fn ensure_manager(
 
     if let Ok(stream) = UnixStream::connect(&socket_path) {
         send_client_pid(&stream);
-        tracing::info!(path = %socket_path.display(), "connected to existing vm manager");
+        tracing::info!(path = %socket_path.display(), "connected to an existing vm manager");
         return Ok(stream);
     }
 
@@ -117,6 +117,16 @@ pub fn ensure_manager(
 pub fn run_manager(args: vm::VmArg, auto_shutdown_ms: u64) -> Result<()> {
     let project_root = env::current_dir()?;
     tracing::info!(root = %project_root.display(), "vm manager starting");
+    #[cfg(not(feature = "mock-vm"))]
+    {
+        unsafe {
+            env::remove_var("VIBEBOX_SKIP_CODESIGN");
+        }
+        vm::ensure_signed();
+        unsafe {
+            env::set_var("VIBEBOX_SKIP_CODESIGN", "1");
+        }
+    }
     let _pid_guard = ensure_pid_file(&project_root)?;
     #[cfg(feature = "mock-vm")]
     tracing::info!("vm manager using mock executor");
@@ -134,7 +144,6 @@ pub fn run_manager(args: vm::VmArg, auto_shutdown_ms: u64) -> Result<()> {
         #[cfg(feature = "mock-vm")]
         {
             ManagerOptions {
-                ensure_signed: false,
                 detach: true,
                 prepare_vm: false,
             }
@@ -142,7 +151,6 @@ pub fn run_manager(args: vm::VmArg, auto_shutdown_ms: u64) -> Result<()> {
         #[cfg(not(feature = "mock-vm"))]
         {
             ManagerOptions {
-                ensure_signed: true,
                 detach: true,
                 prepare_vm: true,
             }
@@ -583,7 +591,6 @@ enum ManagerEvent {
 }
 
 struct ManagerOptions {
-    ensure_signed: bool,
     detach: bool,
     prepare_vm: bool,
 }
@@ -685,16 +692,6 @@ fn run_manager_with(
     executor: &dyn VmExecutor,
     options: ManagerOptions,
 ) -> Result<()> {
-    if options.ensure_signed {
-        let _had_skip = env::var("VIBEBOX_SKIP_CODESIGN").ok();
-        unsafe {
-            env::remove_var("VIBEBOX_SKIP_CODESIGN");
-        }
-        vm::ensure_signed();
-        unsafe {
-            env::set_var("VIBEBOX_SKIP_CODESIGN", "1");
-        }
-    }
     if options.detach {
         detach_from_terminal();
     }

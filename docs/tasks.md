@@ -62,7 +62,7 @@
 1. [ ] retouch the cli ux.
 2. [x] refactor the code.
 3. [ ] refactor the mount system.
-4. [ ] refactor the vm process lifetime. 
+4. [x] refactor the vm process lifetime. 
 5. [x] Redirect vm output to log.
 6. [x] Redirect vm output to vibebox starting it.
 7. [x] use anyhow to sync api.

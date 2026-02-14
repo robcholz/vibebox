@@ -102,10 +102,17 @@ fn main() -> Result<()> {
         color_eyre::eyre::eyre!(err.to_string())
     })?;
 
-    instance::run_with_ssh(manager_conn).map_err(|err| {
-        tracing::error!(error = %err, "failed to ensure vm manager");
-        color_eyre::eyre::eyre!(err.to_string())
-    })?;
+    if let Err(err) = instance::run_with_ssh(manager_conn) {
+        if let Some(instance::InstanceError::UnexpectedDisconnection) =
+            err.downcast_ref::<instance::InstanceError>()
+        {
+            tracing::warn!("vm manager disconnected; exiting vibebox");
+        } else {
+            let message = err.to_string();
+            tracing::error!(error = %message, "vibebox exited: uncaught error");
+            return Err(color_eyre::eyre::eyre!(message));
+        }
+    }
 
     tracing::info!("See you again — keep vibecoding (no SEVs, only vibes) 😈");
 
