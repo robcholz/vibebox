@@ -1,5 +1,5 @@
+use crate::instance::{VmLiveness, vm_liveness};
 use crate::session_manager::INSTANCE_DIR_NAME;
-use crate::utils::{VmManagerLiveness, vm_manager_liveness};
 use crate::{
     config::CONFIG_PATH_ENV,
     instance::{

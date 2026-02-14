@@ -68,3 +68,4 @@
 7. [x] use anyhow to sync api.
 8. [ ] add support for ipv6.
 9. [x] use UnixStream instead of status file
+10. [x] liveness check should also happen when waiting for ssh port

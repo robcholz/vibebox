@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::FileTypeExt;
 use std::{
     env, fs,
     io::{self, IsTerminal, Read},
@@ -21,6 +22,7 @@ use uuid::Uuid;
 use crate::{
     commands,
     session_manager::INSTANCE_DIR_NAME,
+    session_manager::{VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME},
     vm::{self, LoginAction},
 };
 
@@ -33,6 +35,48 @@ const SSH_CONNECT_RETRIES: usize = 10;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
 const SSH_SETUP_SCRIPT: &str = include_str!("ssh.sh");
 const STATUS_PREFIX: &str = "status:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmLiveness {
+    RunningWithSocket { pid: u32 },
+    RunningWithoutSocket { pid: u32 },
+    NotRunningOrMissing,
+}
+
+pub fn vm_liveness(project_root: &Path) -> Result<VmLiveness> {
+    let instance_dir = ensure_instance_dir(project_root)?;
+    let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
+    let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
+    fn pid_is_alive(pid: u32) -> bool {
+        let pid = pid as libc::pid_t;
+        let result = unsafe { libc::kill(pid, 0) };
+        if result == 0 {
+            return true;
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            Some(code) if code == libc::EPERM => true,
+            Some(code) if code == libc::ESRCH => false,
+            _ => false,
+        }
+    }
+    let Ok(content) = fs::read_to_string(pid_path) else {
+        return Ok(VmLiveness::NotRunningOrMissing);
+    };
+    let Ok(pid) = content.trim().parse::<u32>() else {
+        return Ok(VmLiveness::NotRunningOrMissing);
+    };
+    if !pid_is_alive(pid) {
+        return Ok(VmLiveness::NotRunningOrMissing);
+    }
+    let has_socket = fs::metadata(socket_path)
+        .map(|meta| meta.file_type().is_socket())
+        .unwrap_or(false);
+    if has_socket {
+        Ok(VmLiveness::RunningWithSocket { pid })
+    } else {
+        Ok(VmLiveness::RunningWithoutSocket { pid })
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstanceError {
@@ -90,7 +134,7 @@ pub fn run_with_ssh(manager_conn: UnixStream) -> Result<()> {
         .with_context(|| "failed to load instance IP address")?;
     tracing::info!(ip = %ip, "vm ipv4 ready");
 
-    run_ssh_session(ssh_key, ssh_user, ip, manager_conn)
+    run_ssh_session(ssh_key, ssh_user, ip, manager_conn, project_root)
 }
 
 pub fn ensure_instance_dir(project_root: &Path) -> Result<PathBuf, io::Error> {
@@ -301,9 +345,13 @@ fn run_ssh_session(
     ssh_user: String,
     ip: String,
     manager_conn: UnixStream,
+    project_root: PathBuf,
 ) -> Result<()> {
     let mut attempts = 0usize;
     loop {
+        if matches!(vm_liveness(&project_root)?, VmLiveness::NotRunningOrMissing) {
+            return Err(InstanceError::UnexpectedDisconnection.into());
+        }
         attempts += 1;
         if !ssh_port_open(&ip) {
             tracing::debug!(attempts, "ssh port doesn't open yet");

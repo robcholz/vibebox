@@ -6,8 +6,7 @@ use std::{
 };
 
 use crate::config::config_path;
-use crate::instance::read_instance_config;
-use crate::utils::{VmManagerLiveness, vm_manager_liveness};
+use crate::instance::{VmLiveness, read_instance_config, vm_liveness};
 use serde::{Deserialize, Serialize};
 
 pub const INSTANCE_DIR_NAME: &str = ".vibebox";
@@ -269,14 +268,16 @@ fn is_vibebox_dir(directory: &Path) -> bool {
 fn is_session_active(directory: &Path) -> bool {
     let instance_dir = directory.join(INSTANCE_DIR_NAME);
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
-    let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
-    match vm_manager_liveness(&pid_path, &socket_path) {
-        VmManagerLiveness::RunningWithSocket { .. } => true,
-        VmManagerLiveness::RunningWithoutSocket { .. } => true,
-        VmManagerLiveness::NotRunningOrMissing => {
-            let _ = fs::remove_file(&pid_path);
-            false
-        }
+    match vm_liveness(directory) {
+        Ok(liveness) => match liveness {
+            VmLiveness::RunningWithSocket { .. } => true,
+            VmLiveness::RunningWithoutSocket { .. } => true,
+            VmLiveness::NotRunningOrMissing => {
+                let _ = fs::remove_file(&pid_path);
+                false
+            }
+        },
+        Err(_) => false,
     }
 }
 
