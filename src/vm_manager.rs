@@ -64,7 +64,7 @@ pub fn ensure_manager(
 
     if let Ok(stream) = UnixStream::connect(&socket_path) {
         send_client_pid(&stream);
-        tracing::info!(path = %socket_path.display(), "connected to existing vm manager");
+        tracing::info!(path = %socket_path.display(), "connected to an existing vm manager");
         return Ok(stream);
     }
 
