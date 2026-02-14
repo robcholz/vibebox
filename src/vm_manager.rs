@@ -519,8 +519,8 @@ fn read_client_pid(stream: &UnixStream) -> Option<u32> {
 fn spawn_manager_io(
     config: Arc<Mutex<InstanceConfig>>,
     project_dir: PathBuf,
-    _clients: ClientStreams,
-    _latest_status: SharedStatus,
+    clients: ClientStreams,
+    latest_status: SharedStatus,
     output_monitor: Arc<vm::OutputMonitor>,
     vm_output_fd: std::os::unix::io::OwnedFd,
     vm_input_fd: std::os::unix::io::OwnedFd,
@@ -556,6 +556,17 @@ fn spawn_manager_io(
             line_buf.drain(..=pos);
 
             let cleaned = line.trim_start_matches(['\r', ' ']);
+            if let Some(pos) = cleaned.find("VIBEBOX_SCRIPT_ERROR:") {
+                let failure = cleaned[(pos + "VIBEBOX_SCRIPT_ERROR:".len())..].trim();
+                if !failure.is_empty() {
+                    tracing::error!(script_failure = %failure, "[vm] script reported failure");
+                    broadcast_status(
+                        &clients,
+                        &latest_status,
+                        &format!("{STATUS_ERROR_PREFIX} [vm] script reported failure: {failure}"),
+                    );
+                }
+            }
             if let Some(pos) = cleaned.find("VIBEBOX_IPV4=") {
                 let ip_raw = &cleaned[(pos + "VIBEBOX_IPV4=".len())..];
                 let ip = extract_ipv4(ip_raw).unwrap_or_default();

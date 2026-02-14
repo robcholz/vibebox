@@ -274,8 +274,29 @@ pub fn script_command_from_content(label: &str, script: &str) -> Result<String> 
     let marker = "VIBE_SCRIPT_EOF";
     let guest_dir = "/tmp/vibe-scripts";
     let guest_path = format!("{guest_dir}/{label}.sh");
+    let script_body = match script.split_once('\n') {
+        Some((first, rest)) if first.starts_with("#!") => rest,
+        _ => script,
+    };
+    let wrapped_script = format!(
+        r#"#!/usr/bin/env bash
+set -Eeuo pipefail
+__vibebox_err_reported=0
+__vibebox_report_error() {{
+  local rc="$1"
+  local line="$2"
+  if [ "$__vibebox_err_reported" -eq 0 ]; then
+    echo "VIBEBOX_SCRIPT_ERROR:{label}:${{line}}:${{rc}}"
+    __vibebox_err_reported=1
+  fi
+}}
+trap '__vibebox_report_error "$?" "${{LINENO}}"' ERR
+trap 'rc="$?"; if [ "$rc" -ne 0 ]; then __vibebox_report_error "$rc" "${{LINENO}}"; fi' EXIT
+{script_body}
+"#
+    );
     let command = format!(
-        "mkdir -p {guest_dir}\ncat >{guest_path} <<'{marker}'\n{script}\n{marker}\nchmod +x {guest_path}\n{guest_path}"
+        "mkdir -p {guest_dir}\ncat >{guest_path} <<'{marker}'\n{wrapped_script}\n{marker}\nchmod +x {guest_path}\n{guest_path}"
     );
     if script.contains(marker) {
         bail!(format!(
