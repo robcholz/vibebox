@@ -1,5 +1,5 @@
 use crate::session_manager::INSTANCE_DIR_NAME;
-use crate::utils::pid_is_alive;
+use crate::utils::{VmManagerLiveness, vm_manager_liveness};
 use crate::{
     config::CONFIG_PATH_ENV,
     instance::{
@@ -14,7 +14,6 @@ use std::{
     env, fs,
     io::{Read, Write},
     os::unix::{
-        fs::FileTypeExt,
         fs::PermissionsExt,
         io::AsRawFd,
         net::{UnixListener, UnixStream},
@@ -211,18 +210,18 @@ fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard> {
     let instance_dir = ensure_instance_dir(project_root)?;
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
-    if let Ok(content) = fs::read_to_string(&pid_path)
-        && let Ok(pid) = content.trim().parse::<u32>()
-        && pid_is_alive(pid)
-    {
-        if is_socket_path(&socket_path) {
+    match vm_manager_liveness(&pid_path, &socket_path) {
+        VmManagerLiveness::RunningWithSocket { pid } => {
             bail!("vm manager already running (pid {pid})");
         }
-        tracing::warn!(
-            pid,
-            path = %socket_path.display(),
-            "stale pid file detected with missing socket"
-        );
+        VmManagerLiveness::RunningWithoutSocket { pid } => {
+            tracing::warn!(
+                pid,
+                path = %socket_path.display(),
+                "stale pid file detected with missing socket"
+            );
+        }
+        VmManagerLiveness::NotRunningOrMissing => {}
     }
     let _ = fs::remove_file(&pid_path);
     fs::write(&pid_path, format!("{}\n", std::process::id()))?;
@@ -232,10 +231,12 @@ fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard> {
 
 fn cleanup_stale_manager(instance_dir: &Path) {
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
-    if let Ok(content) = fs::read_to_string(&pid_path)
-        && let Ok(pid) = content.trim().parse::<u32>()
-        && pid_is_alive(pid)
-    {
+    let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
+    if matches!(
+        vm_manager_liveness(&pid_path, &socket_path),
+        VmManagerLiveness::RunningWithSocket { .. }
+            | VmManagerLiveness::RunningWithoutSocket { .. }
+    ) {
         return;
     }
     let _ = fs::remove_file(&pid_path);
@@ -263,12 +264,6 @@ fn inject_project_mount(
     }
     let host = project_root.display();
     mounts.insert(0, format!("{host}:{guest_tilde}:read-write"));
-}
-
-fn is_socket_path(path: &Path) -> bool {
-    fs::metadata(path)
-        .map(|meta| meta.file_type().is_socket())
-        .unwrap_or(false)
 }
 
 fn prepare_mounts_and_links(mut args: vm::VmArg, ssh_user: &str) -> (vm::VmArg, String) {
@@ -475,10 +470,11 @@ fn acquire_spawn_lock(lock_path: &Path) -> Result<Option<fs::File>> {
 }
 
 fn is_lock_stale(lock_path: &Path) -> bool {
-    match read_lock_pid(lock_path) {
-        Some(pid) => !pid_is_alive(pid),
-        None => true,
-    }
+    let probe_socket = lock_path.with_extension("sock");
+    matches!(
+        vm_manager_liveness(lock_path, &probe_socket),
+        VmManagerLiveness::NotRunningOrMissing
+    )
 }
 
 fn read_lock_pid(lock_path: &Path) -> Option<u32> {

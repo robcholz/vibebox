@@ -2,13 +2,12 @@ use anyhow::Result;
 use std::{
     env, fs,
     io::{self, Write},
-    os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
 };
 
 use crate::config::config_path;
 use crate::instance::read_instance_config;
-use crate::utils::pid_is_alive;
+use crate::utils::{VmManagerLiveness, vm_manager_liveness};
 use serde::{Deserialize, Serialize};
 
 pub const INSTANCE_DIR_NAME: &str = ".vibebox";
@@ -271,24 +270,14 @@ fn is_session_active(directory: &Path) -> bool {
     let instance_dir = directory.join(INSTANCE_DIR_NAME);
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
-
-    let pid = read_pid(&pid_path);
-    let is_alive = pid.map(pid_is_alive).unwrap_or(false);
-    if !is_alive {
-        let _ = fs::remove_file(&pid_path);
-        return false;
+    match vm_manager_liveness(&pid_path, &socket_path) {
+        VmManagerLiveness::RunningWithSocket { .. } => true,
+        VmManagerLiveness::RunningWithoutSocket { .. } => true,
+        VmManagerLiveness::NotRunningOrMissing => {
+            let _ = fs::remove_file(&pid_path);
+            false
+        }
     }
-
-    if let Ok(metadata) = fs::metadata(&socket_path) {
-        return metadata.file_type().is_socket();
-    }
-
-    true
-}
-
-fn read_pid(path: &Path) -> Option<u32> {
-    let content = fs::read_to_string(path).ok()?;
-    content.trim().parse::<u32>().ok()
 }
 
 fn read_session_file(path: &Path) -> Result<SessionEntry, SessionError> {
