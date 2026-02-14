@@ -39,8 +39,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVISION_EXPECT_TIMEOUT: Duration = Duration::from_secs(900);
 
+const ERROR_REPORT_SCRIPT: &str = include_str!("error_report.sh");
 const PROVISION_SCRIPT: &str = include_str!("provision.sh");
-const PROVISION_SCRIPT_NAME: &str = "provision.sh";
 const RESIZE_DISK_SCRIPT: &str = include_str!("resize_disk.sh");
 const DEFAULT_RAW_NAME: &str = "default.raw";
 const INSTANCE_RAW_NAME: &str = "instance.raw";
@@ -249,7 +249,7 @@ where
     }
 
     if needs_resize {
-        let resize_cmd = script_command_from_content("resize_disk", RESIZE_DISK_SCRIPT)?;
+        let resize_cmd = script_command_from_content("resize_disk.sh", RESIZE_DISK_SCRIPT)?;
         login_actions.push(Send(resize_cmd));
     }
 
@@ -274,8 +274,15 @@ pub fn script_command_from_content(label: &str, script: &str) -> Result<String> 
     let marker = "VIBE_SCRIPT_EOF";
     let guest_dir = "/tmp/vibe-scripts";
     let guest_path = format!("{guest_dir}/{label}.sh");
+    let script_body = match script.split_once('\n') {
+        Some((first, rest)) if first.starts_with("#!") => rest,
+        _ => script,
+    };
+    let wrapped_script = ERROR_REPORT_SCRIPT
+        .replace("__LABEL__", label)
+        .replace("__SCRIPT_BODY__", script_body);
     let command = format!(
-        "mkdir -p {guest_dir}\ncat >{guest_path} <<'{marker}'\n{script}\n{marker}\nchmod +x {guest_path}\n{guest_path}"
+        "mkdir -p {guest_dir}\ncat >{guest_path} <<'{marker}'\n{wrapped_script}\n{marker}\nchmod +x {guest_path}\n{guest_path}"
     );
     if script.contains(marker) {
         bail!(format!(
@@ -568,7 +575,7 @@ fn ensure_default_image(
     tracing::info!("configuring base image...");
     fs::copy(base_raw, default_raw)?;
 
-    let provision_command = script_command_from_content(PROVISION_SCRIPT_NAME, PROVISION_SCRIPT)?;
+    let provision_command = script_command_from_content("provision.sh", PROVISION_SCRIPT)?;
     let provision_actions = [
         Send(provision_command),
         ExpectEither {
