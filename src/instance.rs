@@ -24,6 +24,8 @@ use crate::{
     vm::{self, LoginAction},
 };
 
+pub const STATUS_VM_ERROR_PREFIX: &str = "error:";
+
 const SSH_KEY_NAME: &str = "ssh_key";
 const INSTANCE_FILENAME: &str = "instance.toml";
 const DEFAULT_SSH_USER: &str = "vibecoder";
@@ -31,12 +33,13 @@ const SSH_CONNECT_RETRIES: usize = 10;
 const SSH_CONNECT_DELAY_MS: u64 = 500;
 const SSH_SETUP_SCRIPT: &str = include_str!("ssh.sh");
 const STATUS_PREFIX: &str = "status:";
-const STATUS_ERROR_PREFIX: &str = "error:";
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstanceError {
     #[error("unexpected disconnection from vm manager")]
     UnexpectedDisconnection,
+    #[error("unexpected error from vm")]
+    VMError(String),
 }
 
 fn default_ssh_user() -> String {
@@ -220,12 +223,12 @@ pub fn extract_ipv4(line: &str) -> Option<String> {
 fn handle_manager_line(line: &str, last_status: &mut Option<String>) -> Result<()> {
     if let Some(status) = line.strip_prefix(STATUS_PREFIX) {
         let status = status.trim();
-        if let Some(message) = status.strip_prefix(STATUS_ERROR_PREFIX) {
+        if let Some(message) = status.strip_prefix(STATUS_VM_ERROR_PREFIX) {
             let message = message.trim();
             if message.is_empty() {
                 bail!("vm manager reported startup failure");
             }
-            bail!(message.to_string());
+            return Err(InstanceError::VMError(message.to_string()).into());
         }
         if !status.is_empty() && last_status.as_deref() != Some(status) {
             tracing::info!("[background]: {}", status);
@@ -311,7 +314,6 @@ fn run_ssh_session(
                 attempts,
                 SSH_CONNECT_RETRIES
             );
-            // todo
             if attempts >= SSH_CONNECT_RETRIES {
                 bail!("ssh port not ready after {SSH_CONNECT_RETRIES} attempts");
             }
@@ -487,7 +489,7 @@ pub fn build_ssh_login_actions(
 
     let key_path = format!("{guest_dir}/{key_name}.pub");
 
-    let setup_script = SSH_SETUP_SCRIPT
+    let ssh_script = SSH_SETUP_SCRIPT
         .replace("__SSH_USER__", &ssh_user)
         .replace("__SUDO_PASSWORD__", &sudo_password)
         .replace("__PROJECT_NAME__", project_name)
@@ -495,7 +497,7 @@ pub fn build_ssh_login_actions(
         .replace("__KEY_PATH__", &key_path)
         .replace("__VIBEBOX_SHELL_SCRIPT__", &commands::render_shell_script())
         .replace("__VIBEBOX_HOME_LINKS__", home_links_script);
-    let setup = vm::script_command_from_content("ssh_setup", &setup_script)
+    let setup = vm::script_command_from_content("ssh.sh", &ssh_script)
         .expect("ssh setup script contained invalid marker");
 
     vec![LoginAction::Send(setup)]

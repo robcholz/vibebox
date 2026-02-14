@@ -3,8 +3,8 @@ use crate::utils::{VmManagerLiveness, vm_manager_liveness};
 use crate::{
     config::CONFIG_PATH_ENV,
     instance::{
-        InstanceConfig, build_ssh_login_actions, ensure_instance_dir, ensure_ssh_keypair,
-        extract_ipv4, load_or_create_instance_config, write_instance_config,
+        InstanceConfig, STATUS_VM_ERROR_PREFIX, build_ssh_login_actions, ensure_instance_dir,
+        ensure_ssh_keypair, extract_ipv4, load_or_create_instance_config, write_instance_config,
     },
     session_manager::{GLOBAL_DIR_NAME, VM_MANAGER_PID_NAME, VM_MANAGER_SOCKET_NAME},
     vm::{self, DirectoryShare, LoginAction, PROJECT_GUEST_BASE, VmInput},
@@ -35,7 +35,6 @@ const HARD_SHUTDOWN_TIMEOUT_MS: u64 = 1_000;
 #[cfg(not(test))]
 const HARD_SHUTDOWN_TIMEOUT_MS: u64 = 12_000;
 const STATUS_PREFIX: &str = "status:";
-const STATUS_ERROR_PREFIX: &str = "error:";
 
 type ClientStreams = Arc<Mutex<Vec<UnixStream>>>;
 type SharedStatus = Arc<Mutex<String>>;
@@ -58,7 +57,7 @@ pub fn ensure_manager(
     let project_root = env::current_dir()?;
     tracing::debug!(root = %project_root.display(), "ensure vm manager");
     let instance_dir = ensure_instance_dir(&project_root)?;
-    cleanup_stale_manager(&instance_dir);
+    cleanup_stale_manager(&project_root)?;
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
 
     if let Ok(stream) = UnixStream::connect(&socket_path) {
@@ -210,18 +209,18 @@ fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard> {
     let instance_dir = ensure_instance_dir(project_root)?;
     let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
     let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
-    match vm_manager_liveness(&pid_path, &socket_path) {
-        VmManagerLiveness::RunningWithSocket { pid } => {
+    match vm_liveness(project_root)? {
+        VmLiveness::RunningWithSocket { pid } => {
             bail!("vm manager already running (pid {pid})");
         }
-        VmManagerLiveness::RunningWithoutSocket { pid } => {
+        VmLiveness::RunningWithoutSocket { pid } => {
             tracing::warn!(
                 pid,
                 path = %socket_path.display(),
                 "stale pid file detected with missing socket"
             );
         }
-        VmManagerLiveness::NotRunningOrMissing => {}
+        VmLiveness::NotRunningOrMissing => {}
     }
     let _ = fs::remove_file(&pid_path);
     fs::write(&pid_path, format!("{}\n", std::process::id()))?;
@@ -229,17 +228,18 @@ fn ensure_pid_file(project_root: &Path) -> Result<PidFileGuard> {
     Ok(PidFileGuard { path: pid_path })
 }
 
-fn cleanup_stale_manager(instance_dir: &Path) {
-    let pid_path = instance_dir.join(VM_MANAGER_PID_NAME);
-    let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
+fn cleanup_stale_manager(project_root: &Path) -> Result<()> {
+    let pid_path = project_root
+        .join(INSTANCE_DIR_NAME)
+        .join(VM_MANAGER_PID_NAME);
     if matches!(
-        vm_manager_liveness(&pid_path, &socket_path),
-        VmManagerLiveness::RunningWithSocket { .. }
-            | VmManagerLiveness::RunningWithoutSocket { .. }
+        vm_liveness(project_root)?,
+        VmLiveness::RunningWithSocket { .. } | VmLiveness::RunningWithoutSocket { .. }
     ) {
-        return;
+        return Ok(());
     }
     let _ = fs::remove_file(&pid_path);
+    Ok(())
 }
 
 fn inject_project_mount(
@@ -469,12 +469,12 @@ fn acquire_spawn_lock(lock_path: &Path) -> Result<Option<fs::File>> {
     }
 }
 
-fn is_lock_stale(lock_path: &Path) -> bool {
-    let probe_socket = lock_path.with_extension("sock");
-    matches!(
-        vm_manager_liveness(lock_path, &probe_socket),
-        VmManagerLiveness::NotRunningOrMissing
-    )
+fn is_lock_stale(project_root: &Path) -> bool {
+    let liveness = vm_liveness(project_root);
+    if liveness.is_err() {
+        return false;
+    }
+    matches!(liveness.unwrap(), VmLiveness::NotRunningOrMissing)
 }
 
 fn read_lock_pid(lock_path: &Path) -> Option<u32> {
@@ -556,14 +556,14 @@ fn spawn_manager_io(
             line_buf.drain(..=pos);
 
             let cleaned = line.trim_start_matches(['\r', ' ']);
-            if let Some(pos) = cleaned.find("VIBEBOX_SCRIPT_ERROR:") {
-                let failure = cleaned[(pos + "VIBEBOX_SCRIPT_ERROR:".len())..].trim();
+            if let Some(script_failure) = cleaned.strip_prefix("VIBEBOX_SCRIPT_ERROR:") {
+                let failure = script_failure.trim();
                 if !failure.is_empty() {
                     tracing::error!(script_failure = %failure, "[vm] script reported failure");
                     broadcast_status(
                         &clients,
                         &latest_status,
-                        &format!("{STATUS_ERROR_PREFIX} [vm] script reported failure: {failure}"),
+                        &format!("{STATUS_VM_ERROR_PREFIX} {failure}"),
                     );
                 }
             }
@@ -823,7 +823,7 @@ fn run_manager_with(
         broadcast_status(
             &clients,
             &latest_status,
-            &format!("{STATUS_ERROR_PREFIX} {err}"),
+            &format!("{STATUS_VM_ERROR_PREFIX} {err}"),
         );
     }
     let _ = event_tx.send(ManagerEvent::VmExited(vm_err.clone()));

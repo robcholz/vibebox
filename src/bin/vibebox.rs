@@ -107,6 +107,10 @@ fn main() -> Result<()> {
             err.downcast_ref::<instance::InstanceError>()
         {
             tracing::warn!("vm manager disconnected; exiting vibebox");
+        } else if let Some(instance::InstanceError::VMError(vm_error)) =
+            err.downcast_ref::<instance::InstanceError>()
+        {
+            tracing::error!("[vm]: {vm_error}");
         } else {
             let message = err.to_string();
             tracing::error!(error = %message, "vibebox exited: uncaught error");
