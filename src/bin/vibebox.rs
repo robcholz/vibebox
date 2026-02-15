@@ -111,6 +111,8 @@ fn main() -> Result<()> {
             err.downcast_ref::<instance::InstanceError>()
         {
             tracing::error!("[vm]: {vm_error}");
+            tracing::info!("vibecoding paused: the VM says today is a rest day 😴");
+            std::process::exit(1);
         } else {
             let message = err.to_string();
             tracing::error!(error = %message, "vibebox exited: uncaught error");

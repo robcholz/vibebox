@@ -469,18 +469,30 @@ fn acquire_spawn_lock(lock_path: &Path) -> Result<Option<fs::File>> {
     }
 }
 
-fn is_lock_stale(project_root: &Path) -> bool {
-    let liveness = vm_liveness(project_root);
-    if liveness.is_err() {
-        return false;
+fn is_lock_stale(lock_path: &Path) -> bool {
+    match read_lock_pid(lock_path) {
+        Some(pid) => !pid_is_alive(pid),
+        None => true,
     }
-    matches!(liveness.unwrap(), VmLiveness::NotRunningOrMissing)
 }
 
 fn read_lock_pid(lock_path: &Path) -> Option<u32> {
     let content = fs::read_to_string(lock_path).ok()?;
     let line = content.lines().next()?;
     line.strip_prefix("pid=")?.trim().parse::<u32>().ok()
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    let pid = pid as libc::pid_t;
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return true;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(code) if code == libc::EPERM => true,
+        Some(code) if code == libc::ESRCH => false,
+        _ => false,
+    }
 }
 
 fn read_client_pid(stream: &UnixStream) -> Option<u32> {
@@ -958,7 +970,7 @@ fn manager_event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::mpsc, thread, time::Duration};
+    use std::{fs, sync::mpsc, thread, time::Duration};
 
     #[test]
     fn manager_powers_off_after_grace_when_no_refs() {
@@ -1039,5 +1051,27 @@ mod tests {
         }
         let _ = event_tx.send(ManagerEvent::VmExited(None));
         let _ = manager_thread.join();
+    }
+
+    #[test]
+    fn lock_is_not_stale_when_owner_pid_is_alive() {
+        let temp = tempfile::Builder::new()
+            .prefix("vb")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let lock_path = temp.path().join("vm.lock");
+        fs::write(&lock_path, format!("pid={}\n", std::process::id())).expect("write lock");
+        assert!(!is_lock_stale(&lock_path));
+    }
+
+    #[test]
+    fn lock_is_stale_when_owner_pid_is_missing() {
+        let temp = tempfile::Builder::new()
+            .prefix("vb")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let lock_path = temp.path().join("vm.lock");
+        fs::write(&lock_path, "pid=999999\n").expect("write lock");
+        assert!(is_lock_stale(&lock_path));
     }
 }
