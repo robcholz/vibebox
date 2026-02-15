@@ -114,8 +114,8 @@ mise_ok() { command -v mise >/dev/null 2>&1 || [ -x "$MISE_BIN" ]; }
 mise_install() {
   if [ ! -x "$MISE_BIN" ] && ! command -v mise >/dev/null 2>&1; then
     if ! curl https://mise.run | HOME="$USER_HOME" sh; then
-      mise_warn "mise install script failed (continuing)"
-      return 0
+      mise_warn "mise install script failed"
+      return 1
     fi
   fi
   echo 'eval "$(~/.local/bin/mise activate bash)"' >> "${USER_HOME}/.bashrc"
@@ -141,18 +141,21 @@ MISE
   touch "${USER_HOME}/.config/mise/mise.lock"
   if [ -x "$MISE_BIN" ]; then
     if ! HOME="$USER_HOME" "$MISE_BIN" install; then
-      mise_warn "mise install failed (continuing)"
-      return 0
+      mise_warn "mise install failed"
+      return 1
     fi
   else
     if ! HOME="$USER_HOME" mise install; then
-      mise_warn "mise install failed (continuing)"
-      return 0
+      mise_warn "mise install failed"
+      return 1
     fi
   fi
 }
 
-mise_install || true
+if ! mise_install; then
+  diag "mise installation failed"
+  vibebox_fail "mise installation failed" 1
+fi
 
 # 3) start ssh (don't swallow failures)
 # If ssh is already active, don't force start/restart.
@@ -160,7 +163,7 @@ if ! systemctl is-active --quiet ssh; then
   if ! systemctl start ssh; then
     diag "systemctl start ssh failed"
     dump_diag
-    exit 1
+    vibebox_fail "failed to start ssh service" 1
   fi
 fi
 
@@ -198,7 +201,7 @@ done
 if [ -z "$dev" ] || [ -z "$ip" ]; then
   diag "no stable IPv4 on default route interface"
   dump_diag
-  exit 1
+  vibebox_fail "no stable ipv4 route on default interface" 1
 fi
 
 # 5) strong verify: ssh must listen externally (0.0.0.0:22 or $ip:22 or [::]:22)
@@ -217,7 +220,7 @@ done
 if ! listens_ok; then
   diag "sshd not listening on 0.0.0.0:22 / ${ip}:22"
   dump_diag
-  exit 1
+  vibebox_fail "sshd is not listening on the expected address" 1
 fi
 
 ip a
