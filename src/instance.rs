@@ -82,7 +82,7 @@ pub fn vm_liveness(project_root: &Path) -> Result<VmLiveness> {
 pub enum InstanceError {
     #[error("unexpected disconnection from vm manager")]
     UnexpectedDisconnection,
-    #[error("unexpected error from vm")]
+    #[error("{0}")]
     VMError(String),
 }
 
