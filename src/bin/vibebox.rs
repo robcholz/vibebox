@@ -6,7 +6,8 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal, Read, Write},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -42,6 +43,12 @@ enum Command {
     PurgeCache,
     /// Explain mounts and mappings
     Explain,
+    /// Internal: vsock proxy for SSH ProxyCommand
+    #[command(hide = true)]
+    VsockProxy {
+        /// Path to the VM manager Unix socket
+        socket_path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -92,31 +99,57 @@ fn main() -> Result<()> {
     }
 
     tracing::debug!(config.supervisor.auto_shutdown_ms, "auto shutdown config");
-    let manager_conn = vm_manager::ensure_manager(
-        &raw_args,
-        config.supervisor.auto_shutdown_ms,
-        config_override.as_deref(),
-    )
-    .map_err(|err| {
-        tracing::error!(error = %err, "failed to ensure vm manager");
-        color_eyre::eyre::eyre!(err.to_string())
-    })?;
 
-    if let Err(err) = instance::run_with_ssh(manager_conn) {
-        if let Some(instance::InstanceError::UnexpectedDisconnection) =
-            err.downcast_ref::<instance::InstanceError>()
-        {
-            tracing::warn!("vm manager disconnected; exiting vibebox");
-        } else if let Some(instance::InstanceError::VMError(vm_error)) =
-            err.downcast_ref::<instance::InstanceError>()
-        {
-            tracing::error!("[vm]: {vm_error}");
-            tracing::info!("vibecoding paused: the VM says today is a rest day 😴");
-            std::process::exit(1);
-        } else {
-            let message = err.to_string();
-            tracing::error!(error = %message, "vibebox exited: uncaught error");
-            return Err(color_eyre::eyre::eyre!(message));
+    // Retry loop: if we connect to a manager that is shutting down,
+    // the connection drops before the VM is ready. In that case, retry
+    // — the next attempt will spawn a fresh manager.
+    let mut retried = false;
+    loop {
+        let manager_conn = vm_manager::ensure_manager(
+            &raw_args,
+            config.supervisor.auto_shutdown_ms,
+            config_override.as_deref(),
+        )
+        .map_err(|err| {
+            tracing::error!(error = %err, "failed to ensure vm manager");
+            color_eyre::eyre::eyre!(err.to_string())
+        })?;
+
+        match instance::run_with_ssh(manager_conn) {
+            Ok(()) => break,
+            Err(err) => {
+                if let Some(instance::InstanceError::VMError(vm_error)) =
+                    err.downcast_ref::<instance::InstanceError>()
+                {
+                    tracing::error!("[vm]: {vm_error}");
+                    tracing::info!("vibecoding paused: the VM says today is a rest day 😴");
+                    std::process::exit(1);
+                }
+
+                // Manager disconnected (old VM was shutting down) — retry once
+                // to spawn a fresh manager with a new VM.
+                let is_disconnect = err
+                    .downcast_ref::<instance::InstanceError>()
+                    .is_some_and(|e| {
+                        matches!(e, instance::InstanceError::UnexpectedDisconnection)
+                    })
+                    || err.to_string().contains("vm manager disconnected");
+
+                if is_disconnect && !retried {
+                    tracing::info!("vm manager was shutting down, starting a fresh VM...");
+                    retried = true;
+                    continue;
+                }
+
+                if is_disconnect {
+                    tracing::warn!("vm manager disconnected; exiting vibebox");
+                    break;
+                }
+
+                let message = err.to_string();
+                tracing::error!(error = %message, "vibebox exited: uncaught error");
+                return Err(color_eyre::eyre::eyre!(message));
+            }
         }
     }
 
@@ -206,6 +239,42 @@ fn handle_command(command: Command, cwd: &Path, config_override: Option<&Path>) 
             );
             Ok(())
         }
+        Command::VsockProxy { socket_path } => {
+            let mut stream = UnixStream::connect(&socket_path)
+                .map_err(|e| color_eyre::eyre::eyre!("connect to manager socket: {}", e))?;
+            stream.write_all(b"vsock-connect\n")?;
+            stream.flush()?;
+
+            // Read response line
+            let mut buf = [0u8; 256];
+            let mut len = 0;
+            loop {
+                let n = stream.read(&mut buf[len..])?;
+                if n == 0 {
+                    return Err(color_eyre::eyre::eyre!("manager closed connection"));
+                }
+                len += n;
+                if buf[..len].contains(&b'\n') || len >= buf.len() {
+                    break;
+                }
+            }
+            let nl_pos = buf[..len].iter().position(|&b| b == b'\n')
+                .ok_or_else(|| color_eyre::eyre::eyre!("no newline in response"))?;
+            let line = String::from_utf8_lossy(&buf[..nl_pos]);
+            if !line.starts_with("vsock-ok") {
+                return Err(color_eyre::eyre::eyre!("vsock connect failed: {}", line.trim()));
+            }
+
+            // Write any leftover bytes past the newline (beginning of SSH stream)
+            let leftover = &buf[nl_pos + 1..len];
+            if !leftover.is_empty() {
+                io::stdout().write_all(leftover)?;
+                io::stdout().flush()?;
+            }
+
+            // Relay stdin <-> socket
+            vsock_proxy_relay(stream)
+        }
         Command::Explain => {
             let config = config::load_config_with_path(cwd, config_override)
                 .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
@@ -221,6 +290,44 @@ fn handle_command(command: Command, cwd: &Path, config_override: Option<&Path>) 
             Ok(())
         }
     }
+}
+
+fn vsock_proxy_relay(mut stream: UnixStream) -> Result<()> {
+    let mut stream_writer = stream.try_clone()?;
+
+    // stdin → socket
+    let t1 = std::thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        let mut buf = [0u8; 8192];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stream_writer.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = stream_writer.shutdown(std::net::Shutdown::Write);
+    });
+
+    // socket → stdout (must flush — stdout is fully buffered when piped)
+    let mut stdout = io::stdout().lock();
+    let mut buf = [0u8; 8192];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if stdout.write_all(&buf[..n]).is_err() || stdout.flush().is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = t1.join();
+    Ok(())
 }
 
 fn project_name(directory: &Path) -> String {

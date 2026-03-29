@@ -134,7 +134,8 @@ pub fn run_with_ssh(manager_conn: UnixStream) -> Result<()> {
         .with_context(|| "failed to load instance IP address")?;
     tracing::info!(ip = %ip, "vm ipv4 ready");
 
-    run_ssh_session(ssh_key, ssh_user, ip, manager_conn, project_root)
+    let socket_path = instance_dir.join(VM_MANAGER_SOCKET_NAME);
+    run_ssh_session(ssh_key, ssh_user, ip, manager_conn, project_root, socket_path)
 }
 
 pub fn ensure_instance_dir(project_root: &Path) -> Result<PathBuf, io::Error> {
@@ -346,15 +347,95 @@ fn run_ssh_session(
     ip: String,
     manager_conn: UnixStream,
     project_root: PathBuf,
+    socket_path: PathBuf,
+) -> Result<()> {
+    // Phase 1: try vsock (single attempt — if it connects, we're done)
+    if let Some(exe) = std::env::current_exe().ok() {
+        tracing::info!("trying vsock ssh");
+        match try_vsock_ssh(&exe, &ssh_key, &ssh_user, &socket_path, &manager_conn, &project_root)
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if let Some(InstanceError::UnexpectedDisconnection) =
+                    err.downcast_ref::<InstanceError>()
+                {
+                    return Err(err);
+                }
+                tracing::warn!("vsock ssh unavailable, falling back to TCP");
+            }
+        }
+    }
+
+    // Phase 2: TCP (only reached if vsock failed to connect)
+    tracing::info!(ip = %ip, "using tcp ssh");
+    try_tcp_ssh(&ssh_key, &ssh_user, &ip, &manager_conn, &project_root)
+}
+
+fn try_vsock_ssh(
+    exe: &Path,
+    ssh_key: &Path,
+    ssh_user: &str,
+    socket_path: &Path,
+    manager_conn: &UnixStream,
+    project_root: &Path,
+) -> Result<()> {
+    if matches!(vm_liveness(project_root)?, VmLiveness::NotRunningOrMissing) {
+        return Err(InstanceError::UnexpectedDisconnection.into());
+    }
+
+    let proxy_cmd = format!(
+        "\"{}\" vsock-proxy \"{}\"",
+        exe.display(),
+        socket_path.display()
+    );
+
+    let mut child = Command::new("ssh")
+        .args([
+            "-i",
+            ssh_key.to_str().with_context(|| "invalid path")?,
+            "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "PasswordAuthentication=no",
+            "-o", "BatchMode=yes",
+            "-o", "LogLevel=ERROR",
+            "-o", "ConnectTimeout=5",
+            "-o", &format!("ProxyCommand={}", proxy_cmd),
+        ])
+        .env_remove("LC_CTYPE")
+        .env_remove("LC_ALL")
+        .env_remove("LANG")
+        .arg(format!("{ssh_user}@vibebox-vm"))
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+
+    match wait_ssh_child(&mut child, manager_conn, None)? {
+        SshExit::Success | SshExit::UserExit(_) => Ok(()),
+        SshExit::ConnectionFailed => bail!("vsock ssh connection failed"),
+        SshExit::TimedOut => bail!("vsock ssh timed out"),
+        SshExit::Disconnected => Err(InstanceError::UnexpectedDisconnection.into()),
+    }
+}
+
+fn try_tcp_ssh(
+    ssh_key: &Path,
+    ssh_user: &str,
+    ip: &str,
+    manager_conn: &UnixStream,
+    project_root: &Path,
 ) -> Result<()> {
     let mut attempts = 0usize;
+
     loop {
-        if matches!(vm_liveness(&project_root)?, VmLiveness::NotRunningOrMissing) {
+        if matches!(vm_liveness(project_root)?, VmLiveness::NotRunningOrMissing) {
             return Err(InstanceError::UnexpectedDisconnection.into());
         }
         attempts += 1;
-        if !ssh_port_open(&ip) {
-            tracing::debug!(attempts, "ssh port doesn't open yet");
+
+        if !ssh_port_open(ip) {
             tracing::info!(
                 attempts,
                 ip = %ip,
@@ -373,30 +454,22 @@ fn run_ssh_session(
             attempts,
             user = %ssh_user,
             ip = %ip,
-            "starting ssh ({}/{})",
+            "starting tcp ssh ({}/{})",
             attempts,
             SSH_CONNECT_RETRIES
         );
-        let child = Command::new("ssh")
+        let mut child = Command::new("ssh")
             .args([
                 "-i",
                 ssh_key.to_str().with_context(|| "invalid path")?,
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "GlobalKnownHostsFile=/dev/null",
-                "-o",
-                "PasswordAuthentication=no",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "LogLevel=ERROR",
-                "-o",
-                "ConnectTimeout=5",
+                "-o", "IdentitiesOnly=yes",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "GlobalKnownHostsFile=/dev/null",
+                "-o", "PasswordAuthentication=no",
+                "-o", "BatchMode=yes",
+                "-o", "LogLevel=ERROR",
+                "-o", "ConnectTimeout=5",
             ])
             .env_remove("LC_CTYPE")
             .env_remove("LC_ALL")
@@ -405,72 +478,96 @@ fn run_ssh_session(
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .spawn();
+            .spawn()?;
 
-        match child {
-            Ok(mut child) => {
-                let done = Arc::new(AtomicBool::new(false));
-                let done_for_monitor = done.clone();
-                let (disconnect_tx, disconnect_rx) = mpsc::channel::<()>();
-                let mut manager_stream = manager_conn.try_clone()?;
-                let _ = manager_stream.set_read_timeout(Some(Duration::from_millis(250)));
-                thread::spawn(move || {
-                    let mut buf = [0u8; 1];
-                    while !done_for_monitor.load(Ordering::Relaxed) {
-                        match manager_stream.read(&mut buf) {
-                            Ok(0) => {
-                                let _ = disconnect_tx.send(());
-                                return;
-                            }
-                            Ok(_) => {}
-                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                            Err(err) if err.kind() == io::ErrorKind::TimedOut => {}
-                            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                            Err(_) => {
-                                let _ = disconnect_tx.send(());
-                                return;
-                            }
-                        }
-                    }
-                });
-
-                let status = loop {
-                    if disconnect_rx.try_recv().is_ok() {
-                        done.store(true, Ordering::Relaxed);
-                        terminate_ssh_child(&mut child);
-                        restore_terminal_after_disconnect();
-                        return Err(InstanceError::UnexpectedDisconnection.into());
-                    }
-                    if let Some(status) = child.try_wait()? {
-                        done.store(true, Ordering::Relaxed);
-                        break status;
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                };
-
-                if status.success() {
-                    tracing::info!(status = %status, "ssh exited");
-                    break;
+        match wait_ssh_child(&mut child, manager_conn, None)? {
+            SshExit::Success | SshExit::UserExit(_) => return Ok(()),
+            SshExit::ConnectionFailed | SshExit::TimedOut => {
+                tracing::warn!("tcp ssh connection failed");
+                if attempts >= SSH_CONNECT_RETRIES {
+                    bail!("ssh failed after {SSH_CONNECT_RETRIES} attempts");
                 }
-                if status.code() == Some(255) {
-                    tracing::warn!(status = %status, "ssh connection failed");
-                    if attempts >= SSH_CONNECT_RETRIES {
-                        bail!("ssh failed after {SSH_CONNECT_RETRIES} attempts");
-                    }
-                    thread::sleep(Duration::from_millis(500));
-                    continue;
-                }
-                tracing::info!(status = %status, "ssh exited");
-                break;
+                thread::sleep(Duration::from_millis(SSH_CONNECT_DELAY_MS));
+                continue;
             }
-            Err(err) => {
-                tracing::error!(error = %err, "failed to start ssh");
-                bail!("failed to start ssh: {err}");
+            SshExit::Disconnected => {
+                return Err(InstanceError::UnexpectedDisconnection.into());
             }
         }
     }
+}
 
-    Ok(())
+enum SshExit {
+    Success,
+    ConnectionFailed,
+    TimedOut,
+    UserExit(std::process::ExitStatus),
+    Disconnected,
+}
+
+fn wait_ssh_child(
+    child: &mut Child,
+    manager_conn: &UnixStream,
+    deadline: Option<Instant>,
+) -> Result<SshExit> {
+    let done = Arc::new(AtomicBool::new(false));
+    let done_for_monitor = done.clone();
+    let (disconnect_tx, disconnect_rx) = mpsc::channel::<()>();
+    let mut manager_stream = manager_conn.try_clone()?;
+    let _ = manager_stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let monitor_handle = thread::spawn(move || {
+        let mut buf = [0u8; 1];
+        while !done_for_monitor.load(Ordering::Relaxed) {
+            match manager_stream.read(&mut buf) {
+                Ok(0) => {
+                    let _ = disconnect_tx.send(());
+                    return;
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                Err(err) if err.kind() == io::ErrorKind::TimedOut => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    let _ = disconnect_tx.send(());
+                    return;
+                }
+            }
+        }
+    });
+
+    let status = loop {
+        if disconnect_rx.try_recv().is_ok() {
+            done.store(true, Ordering::Relaxed);
+            terminate_ssh_child(child);
+            restore_terminal_after_disconnect();
+            let _ = monitor_handle.join();
+            return Ok(SshExit::Disconnected);
+        }
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                done.store(true, Ordering::Relaxed);
+                terminate_ssh_child(child);
+                let _ = monitor_handle.join();
+                return Ok(SshExit::TimedOut);
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            done.store(true, Ordering::Relaxed);
+            break status;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    // Wait for monitor thread to stop before returning
+    let _ = monitor_handle.join();
+
+    if status.success() {
+        Ok(SshExit::Success)
+    } else if status.code() == Some(255) {
+        Ok(SshExit::ConnectionFailed)
+    } else {
+        Ok(SshExit::UserExit(status))
+    }
 }
 
 fn terminate_ssh_child(child: &mut Child) {

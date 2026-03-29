@@ -223,6 +223,11 @@ if ! listens_ok; then
   vibebox_fail "sshd is not listening on the expected address" 1
 fi
 
+# 5b) Start vsock-to-sshd bridge (if socat available)
+if command -v socat >/dev/null 2>&1; then
+  socat VSOCK-LISTEN:2222,reuseaddr,fork TCP:127.0.0.1:22 &
+fi
+
 ip a
 ip link
 curl -s https://api.ipify.org ; echo

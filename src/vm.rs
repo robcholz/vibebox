@@ -35,6 +35,24 @@ const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 280901576;
 const SHARED_DIRECTORIES_TAG: &str = "shared";
 pub const PROJECT_GUEST_BASE: &str = "/usr/local/vibebox-mounts";
 
+/// A request to connect to a vsock port. The response FD is sent back via `response_tx`.
+pub struct VsockConnectRequest {
+    pub port: u32,
+    pub response_tx: mpsc::Sender<Result<VsockConnectionResult, String>>,
+}
+
+/// Result of a vsock connect: the raw FD and a handle to keep the connection alive.
+pub struct VsockConnectionResult {
+    pub fd: std::os::raw::c_int,
+    /// Must be kept alive — dropping this closes the FD.
+    pub _conn: Option<Retained<VZVirtioSocketConnection>>,
+}
+// Safety: The FD is used via raw libc. The Retained handle only prevents deallocation.
+unsafe impl std::marker::Send for VsockConnectionResult {}
+
+/// Channel for background threads to request vsock connections from the main thread.
+pub type VsockConnector = Arc<Mutex<Option<mpsc::Sender<VsockConnectRequest>>>>;
+
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVISION_EXPECT_TIMEOUT: Duration = Duration::from_secs(900);
@@ -155,7 +173,8 @@ pub fn run_with_args<F>(args: VmArg, io_handler: F) -> Result<()>
 where
     F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
 {
-    run_with_args_and_extras(args, io_handler, Vec::new(), Vec::new(), None)
+    let vsock_connector = Arc::new(Mutex::new(None));
+    run_with_args_and_extras(args, io_handler, Vec::new(), Vec::new(), None, vsock_connector)
 }
 
 pub fn run_with_args_and_extras<F>(
@@ -164,6 +183,7 @@ pub fn run_with_args_and_extras<F>(
     extra_login_actions: Vec<LoginAction>,
     extra_directory_shares: Vec<DirectoryShare>,
     status: Option<&StatusEmitter<'_>>,
+    vsock_connector: VsockConnector,
 ) -> Result<()>
 where
     F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
@@ -267,6 +287,7 @@ where
         args.ram_bytes,
         status,
         io_handler,
+        vsock_connector,
     )
 }
 
@@ -596,6 +617,7 @@ fn ensure_default_image(
             move |output_monitor, vm_output_fd, vm_input_fd| {
                 spawn_vm_io_with_log(output_monitor, vm_output_fd, vm_input_fd, log_path)
             },
+            Arc::new(Mutex::new(None)),
         )
     } else {
         run_vm(
@@ -1041,6 +1063,12 @@ fn create_vm_configuration(
         }
 
         ////////////////////////////
+        // Vsock
+        config.setSocketDevices(&NSArray::from_retained_slice(&[Retained::into_super(
+            VZVirtioSocketDeviceConfiguration::new(),
+        )]));
+
+        ////////////////////////////
         // Serial port
         {
             let ns_read_handle = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
@@ -1154,6 +1182,7 @@ fn run_vm_with_io<F>(
     ram_bytes: u64,
     status: Option<&StatusEmitter<'_>>,
     io_handler: F,
+    vsock_connector: VsockConnector,
 ) -> Result<()>
 where
     F: FnOnce(Arc<OutputMonitor>, OwnedFd, OwnedFd) -> IoContext,
@@ -1219,6 +1248,22 @@ where
     tracing::info!("vm booting... go vibecoder!");
     tracing::info!("vm booting");
 
+    // Set up vsock connect channel — requests come from client threads,
+    // processed here on the main thread (required by Virtualization.framework)
+    let vsock_device: Option<Retained<VZVirtioSocketDevice>> = unsafe {
+        let socket_devices = vm.socketDevices();
+        if socket_devices.len() > 0 {
+            let device: Retained<VZVirtioSocketDevice> =
+                Retained::cast_unchecked(socket_devices.objectAtIndex(0));
+            tracing::info!("vsock device ready");
+            Some(device)
+        } else {
+            None
+        }
+    };
+    let (vsock_req_tx, vsock_req_rx) = mpsc::channel::<VsockConnectRequest>();
+    *vsock_connector.lock().unwrap() = Some(vsock_req_tx);
+
     let output_monitor = Arc::new(OutputMonitor::default());
     let io_ctx = io_handler(output_monitor.clone(), we_read_from, we_write_to);
 
@@ -1270,6 +1315,39 @@ where
                 &NSDate::dateWithTimeIntervalSinceNow(0.2),
             )
         };
+
+        // Process vsock connect requests on the main thread
+        if let Some(ref device) = vsock_device {
+            while let Ok(req) = vsock_req_rx.try_recv() {
+                let resp_tx = req.response_tx;
+                let port = req.port;
+                let handler = RcBlock::new(
+                    move |connection: *mut VZVirtioSocketConnection, error: *mut NSError| {
+                        if !connection.is_null() && error.is_null() {
+                            let fd = unsafe { (*connection).fileDescriptor() };
+                            let conn = unsafe { Retained::retain(connection) };
+                            if conn.is_none() {
+                                let _ = resp_tx
+                                    .send(Err("failed to retain connection".to_string()));
+                                return;
+                            }
+                            let _ = resp_tx.send(Ok(VsockConnectionResult { fd, _conn: conn }));
+                        } else {
+                            let err_msg = if !error.is_null() {
+                                let err = unsafe { &*error };
+                                format!("{}", err.localizedDescription())
+                            } else {
+                                "unknown error".to_string()
+                            };
+                            let _ = resp_tx.send(Err(err_msg));
+                        }
+                    },
+                );
+                unsafe {
+                    device.connectToPort_completionHandler(port, &handler);
+                }
+            }
+        }
 
         let state = unsafe { vm.state() };
         if last_state != Some(state) {
@@ -1343,6 +1421,7 @@ fn run_vm(
         ram_bytes,
         status,
         spawn_vm_io,
+        Arc::new(Mutex::new(None)),
     )
 }
 

@@ -59,7 +59,8 @@ apt-get install -y --no-install-recommends      \
         ripgrep                                 \
         cloud-guest-utils                       \
         openssh-server                          \
-        sudo
+        sudo                                    \
+        socat
 
 # Set hostname to "vibebox" so it's clear that you're inside the VM.
 hostnamectl set-hostname vibebox

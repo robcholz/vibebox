@@ -495,9 +495,9 @@ fn pid_is_alive(pid: u32) -> bool {
     }
 }
 
-fn read_client_pid(stream: &UnixStream) -> Option<u32> {
+fn read_first_line(stream: &UnixStream) -> Option<String> {
     let mut stream = stream.try_clone().ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let mut buf = [0u8; 64];
     let mut len = 0usize;
     loop {
@@ -518,13 +518,147 @@ fn read_client_pid(stream: &UnixStream) -> Option<u32> {
     if len == 0 {
         return None;
     }
-    let line = String::from_utf8_lossy(&buf[..len]);
-    let trimmed = line.trim();
-    if let Some(value) = trimmed.strip_prefix("pid=") {
-        value.parse::<u32>().ok()
-    } else {
-        None
+    Some(String::from_utf8_lossy(&buf[..len]).trim().to_string())
+}
+
+fn parse_client_pid(line: &str) -> Option<u32> {
+    line.strip_prefix("pid=")?.parse::<u32>().ok()
+}
+
+fn connect_vsock(
+    vsock_connector: &vm::VsockConnector,
+    port: u32,
+) -> Result<vm::VsockConnectionResult> {
+    let sender = vsock_connector
+        .lock()
+        .map_err(|_| anyhow!("vsock mutex poisoned"))?
+        .clone()
+        .ok_or_else(|| anyhow!("vsock connector not ready"))?;
+
+    let (resp_tx, resp_rx) = mpsc::channel();
+    sender
+        .send(vm::VsockConnectRequest {
+            port,
+            response_tx: resp_tx,
+        })
+        .map_err(|_| anyhow!("vsock connector channel closed"))?;
+
+    resp_rx
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| anyhow!("vsock connect timed out"))?
+        .map_err(|e| anyhow!("vsock connect failed: {}", e))
+}
+
+fn handle_vsock_connect(mut stream: UnixStream, vsock_connector: &vm::VsockConnector) {
+    match connect_vsock(vsock_connector, 2222) {
+        Ok(result) => {
+            if stream.write_all(b"vsock-ok\n").is_err() || stream.flush().is_err() {
+                return;
+            }
+            relay_bidirectional(stream, result);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "vsock connect failed");
+            let msg = format!("vsock-err:{}\n", e);
+            let _ = stream.write_all(msg.as_bytes());
+            let _ = stream.flush();
+        }
     }
+}
+
+fn relay_bidirectional(client: UnixStream, conn: vm::VsockConnectionResult) {
+    let vsock_fd = conn.fd;
+
+    // Dup FDs for each thread so they're independent of the connection handle.
+    // After duping, we drop `conn` (closing the original FD). The dup'd FDs
+    // remain valid and each thread owns exactly one.
+    let vsock_write_fd = unsafe { libc::dup(vsock_fd) };
+    if vsock_write_fd < 0 {
+        tracing::error!("failed to dup vsock fd for writer");
+        return;
+    }
+    let vsock_read_fd = unsafe { libc::dup(vsock_fd) };
+    if vsock_read_fd < 0 {
+        tracing::error!("failed to dup vsock fd for reader");
+        unsafe { libc::close(vsock_write_fd) };
+        return;
+    }
+    drop(conn);
+
+    let mut client_reader = match client.try_clone() {
+        Ok(r) => r,
+        Err(_) => {
+            unsafe { libc::close(vsock_write_fd) };
+            unsafe { libc::close(vsock_read_fd) };
+            return;
+        }
+    };
+    let mut client_writer = match client.try_clone() {
+        Ok(w) => w,
+        Err(_) => {
+            unsafe { libc::close(vsock_write_fd) };
+            unsafe { libc::close(vsock_read_fd) };
+            return;
+        }
+    };
+    drop(client);
+
+    // client → vsock
+    let t1 = thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match client_reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut offset = 0;
+                    while offset < n {
+                        let written = unsafe {
+                            libc::write(
+                                vsock_write_fd,
+                                buf[offset..n].as_ptr() as *const libc::c_void,
+                                (n - offset) as libc::size_t,
+                            )
+                        };
+                        if written <= 0 {
+                            unsafe { libc::shutdown(vsock_write_fd, libc::SHUT_WR) };
+                            unsafe { libc::close(vsock_write_fd) };
+                            return;
+                        }
+                        offset += written as usize;
+                    }
+                }
+            }
+        }
+        // Signal vsock write-side shutdown so t2's read unblocks
+        unsafe { libc::shutdown(vsock_write_fd, libc::SHUT_WR) };
+        unsafe { libc::close(vsock_write_fd) };
+    });
+
+    // vsock → client
+    let t2 = thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = unsafe {
+                libc::read(
+                    vsock_read_fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len() as libc::size_t,
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            if client_writer.write_all(&buf[..n as usize]).is_err() {
+                break;
+            }
+        }
+        // Signal Unix socket write-side shutdown so t1's read unblocks
+        let _ = client_writer.shutdown(std::net::Shutdown::Write);
+        unsafe { libc::close(vsock_read_fd) };
+    });
+
+    let _ = t1.join();
+    let _ = t2.join();
 }
 
 #[cfg_attr(feature = "mock-vm", allow(dead_code))]
@@ -626,6 +760,7 @@ trait VmExecutor {
         clients: ClientStreams,
         latest_status: SharedStatus,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
+        vsock_connector: vm::VsockConnector,
     ) -> Result<()>;
 }
 
@@ -643,6 +778,7 @@ impl VmExecutor for RealVmExecutor {
         clients: ClientStreams,
         latest_status: SharedStatus,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
+        vsock_connector: vm::VsockConnector,
     ) -> Result<()> {
         let status_callback = |status: &str| {
             broadcast_status(&clients, &latest_status, status);
@@ -665,6 +801,7 @@ impl VmExecutor for RealVmExecutor {
             extra_login_actions,
             extra_shares,
             Some(&status_callback),
+            vsock_connector,
         )
     }
 }
@@ -684,6 +821,7 @@ impl VmExecutor for MockVmExecutor {
         _clients: ClientStreams,
         _latest_status: SharedStatus,
         vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
+        _vsock_connector: vm::VsockConnector,
     ) -> Result<()> {
         let (tx, rx) = mpsc::channel::<VmInput>();
         *vm_input_tx.lock().unwrap() = Some(tx);
@@ -770,42 +908,61 @@ fn run_manager_with(
 
     let clients: ClientStreams = Arc::new(Mutex::new(Vec::new()));
     let latest_status: SharedStatus = Arc::new(Mutex::new(String::new()));
+    let vsock_connector: vm::VsockConnector = Arc::new(Mutex::new(None));
     let (event_tx, event_rx) = mpsc::channel::<ManagerEvent>();
     let event_tx_accept = event_tx.clone();
     let clients_accept = clients.clone();
     let latest_status_accept = latest_status.clone();
+    let vsock_connector_accept = vsock_connector.clone();
     thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let mut client_fd: Option<std::os::fd::RawFd> = None;
-                    let latest_status_snapshot = latest_status_accept
-                        .lock()
-                        .ok()
-                        .map(|status| status.clone());
-                    if let Ok(writer) = stream.try_clone() {
-                        let writer_fd = writer.as_raw_fd();
-                        if let Ok(mut connected) = clients_accept.lock() {
-                            connected.push(writer);
-                            client_fd = Some(writer_fd);
-                            if let Some(last) = connected.last_mut()
-                                && let Some(status) = latest_status_snapshot.as_deref()
-                                && !status.is_empty()
-                            {
-                                let _ = send_status_line(last, status);
-                            }
-                        }
-                    }
                     let event_tx_conn = event_tx_accept.clone();
                     let clients_conn = clients_accept.clone();
+                    let latest_status_conn = latest_status_accept.clone();
+                    let vsock_connector_conn = vsock_connector_accept.clone();
                     thread::spawn(move || {
-                        let pid = read_client_pid(&stream);
-                        let _ = event_tx_conn.send(ManagerEvent::Inc(pid));
-                        wait_for_disconnect(stream);
-                        if let Some(fd) = client_fd {
-                            remove_client(&clients_conn, fd);
+                        let first_line = read_first_line(&stream);
+                        match first_line.as_deref() {
+                            Some(line) if line.starts_with("vsock-connect") => {
+                                // Vsock relay — no Inc/Dec, no broadcast registration
+                                handle_vsock_connect(stream, &vsock_connector_conn);
+                            }
+                            _ => {
+                                // Normal client (pid= or unknown)
+                                let pid = first_line
+                                    .as_deref()
+                                    .and_then(parse_client_pid);
+
+                                // Register for status broadcasts
+                                let mut client_fd: Option<std::os::fd::RawFd> = None;
+                                if let Ok(writer) = stream.try_clone() {
+                                    let writer_fd = writer.as_raw_fd();
+                                    if let Ok(mut connected) = clients_conn.lock() {
+                                        connected.push(writer);
+                                        client_fd = Some(writer_fd);
+                                        let snapshot = latest_status_conn
+                                            .lock()
+                                            .ok()
+                                            .map(|s| s.clone());
+                                        if let Some(last) = connected.last_mut()
+                                            && let Some(status) = snapshot.as_deref()
+                                            && !status.is_empty()
+                                        {
+                                            let _ = send_status_line(last, status);
+                                        }
+                                    }
+                                }
+
+                                let _ = event_tx_conn.send(ManagerEvent::Inc(pid));
+                                wait_for_disconnect(stream);
+                                if let Some(fd) = client_fd {
+                                    remove_client(&clients_conn, fd);
+                                }
+                                let _ = event_tx_conn.send(ManagerEvent::Dec(pid));
+                            }
                         }
-                        let _ = event_tx_conn.send(ManagerEvent::Dec(pid));
                     });
                 }
                 Err(_) => break,
@@ -815,8 +972,17 @@ fn run_manager_with(
 
     let vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>> = Arc::new(Mutex::new(None));
     let vm_input_for_loop = vm_input_tx.clone();
-    let event_loop_handle =
-        thread::spawn(move || manager_event_loop(event_rx, vm_input_for_loop, auto_shutdown_ms));
+    let config_for_loop = config.clone();
+    let project_root_for_loop = project_root.to_path_buf();
+    let event_loop_handle = thread::spawn(move || {
+        manager_event_loop(
+            event_rx,
+            vm_input_for_loop,
+            auto_shutdown_ms,
+            config_for_loop,
+            project_root_for_loop,
+        )
+    });
 
     tracing::info!("vm manager launching vm");
     let vm_result = executor.run_vm(
@@ -828,6 +994,7 @@ fn run_manager_with(
         clients.clone(),
         latest_status.clone(),
         vm_input_tx.clone(),
+        vsock_connector.clone(),
     );
     tracing::info!("vm manager vm run completed");
     let vm_err = vm_result.err().map(|e| e.to_string());
@@ -860,6 +1027,8 @@ fn manager_event_loop(
     event_rx: mpsc::Receiver<ManagerEvent>,
     vm_input_tx: Arc<Mutex<Option<mpsc::Sender<VmInput>>>>,
     auto_shutdown_ms: u64,
+    config: Arc<Mutex<InstanceConfig>>,
+    project_root: PathBuf,
 ) -> Result<()> {
     let mut ref_count: usize = 0;
     let mut shutdown_deadline: Option<Instant> = None;
@@ -937,6 +1106,14 @@ fn manager_event_loop(
                         shutdown_sent = true;
                         shutdown_deadline = None;
                         hard_deadline = Some(Instant::now() + hard_timeout);
+                        // Clear cached IP so re-entering clients block on wait_for_vm_ipv4
+                        // instead of trying to connect to a dying VM.
+                        if let Ok(mut cfg) = config.lock() {
+                            if cfg.vm_ipv4.is_some() {
+                                cfg.vm_ipv4 = None;
+                                let _ = write_instance_config(&project_root, &cfg);
+                            }
+                        }
                     } else {
                         shutdown_deadline =
                             Some(Instant::now() + Duration::from_millis(SHUTDOWN_RETRY_MS));
@@ -972,6 +1149,17 @@ mod tests {
     use super::*;
     use std::{fs, sync::mpsc, thread, time::Duration};
 
+    fn test_config_and_root() -> (Arc<Mutex<InstanceConfig>>, PathBuf) {
+        let temp = tempfile::Builder::new()
+            .prefix("vb-test")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let root = temp.into_path();
+        let _ = fs::create_dir_all(root.join(INSTANCE_DIR_NAME));
+        let config = Arc::new(Mutex::new(InstanceConfig::default()));
+        (config, root)
+    }
+
     #[test]
     fn manager_powers_off_after_grace_when_no_refs() {
         let _temp = tempfile::Builder::new()
@@ -982,9 +1170,10 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<ManagerEvent>();
         let (vm_tx, vm_rx) = mpsc::channel::<VmInput>();
         let vm_input_tx = Arc::new(Mutex::new(Some(vm_tx)));
+        let (config, root) = test_config_and_root();
 
         let manager_thread = thread::spawn(move || {
-            manager_event_loop(event_rx, vm_input_tx, 50).expect("event loop");
+            manager_event_loop(event_rx, vm_input_tx, 50, config, root).expect("event loop");
         });
 
         event_tx.send(ManagerEvent::Inc(None)).unwrap();
@@ -1008,9 +1197,10 @@ mod tests {
     fn manager_force_exits_when_vm_input_never_ready() {
         let (event_tx, event_rx) = mpsc::channel::<ManagerEvent>();
         let vm_input_tx = Arc::new(Mutex::new(None));
+        let (config, root) = test_config_and_root();
 
         let manager_thread = thread::spawn(move || {
-            let _ = manager_event_loop(event_rx, vm_input_tx, 10);
+            let _ = manager_event_loop(event_rx, vm_input_tx, 10, config, root);
         });
 
         event_tx.send(ManagerEvent::Inc(None)).unwrap();
@@ -1029,9 +1219,10 @@ mod tests {
         let (vm_tx, vm_rx) = mpsc::channel::<VmInput>();
         let vm_input_tx = Arc::new(Mutex::new(None));
         let vm_input_for_thread = vm_input_tx.clone();
+        let (config, root) = test_config_and_root();
 
         let manager_thread = thread::spawn(move || {
-            manager_event_loop(event_rx, vm_input_for_thread, 10).expect("event loop");
+            manager_event_loop(event_rx, vm_input_for_thread, 10, config, root).expect("event loop");
         });
 
         event_tx.send(ManagerEvent::Inc(None)).unwrap();
@@ -1073,5 +1264,46 @@ mod tests {
         let lock_path = temp.path().join("vm.lock");
         fs::write(&lock_path, "pid=999999\n").expect("write lock");
         assert!(is_lock_stale(&lock_path));
+    }
+
+    #[test]
+    fn parse_client_pid_extracts_pid() {
+        assert_eq!(parse_client_pid("pid=123"), Some(123));
+        assert_eq!(parse_client_pid("pid=0"), Some(0));
+        assert_eq!(parse_client_pid("pid=99999"), Some(99999));
+    }
+
+    #[test]
+    fn parse_client_pid_rejects_invalid() {
+        assert_eq!(parse_client_pid("vsock-connect"), None);
+        assert_eq!(parse_client_pid("pid="), None);
+        assert_eq!(parse_client_pid("pid=abc"), None);
+        assert_eq!(parse_client_pid(""), None);
+    }
+
+    #[test]
+    fn read_first_line_reads_from_unix_stream() {
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(b"pid=42\n").unwrap();
+        drop(writer);
+        let line = read_first_line(&reader);
+        assert_eq!(line.as_deref(), Some("pid=42"));
+    }
+
+    #[test]
+    fn read_first_line_reads_vsock_connect() {
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(b"vsock-connect\n").unwrap();
+        drop(writer);
+        let line = read_first_line(&reader);
+        assert_eq!(line.as_deref(), Some("vsock-connect"));
+    }
+
+    #[test]
+    fn read_first_line_returns_none_on_empty() {
+        let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(writer);
+        let line = read_first_line(&reader);
+        assert!(line.is_none());
     }
 }
